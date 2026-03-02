@@ -51,6 +51,7 @@ COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 # Copy src DIRECTLY from build context — NOT from builder stage.
 # This ensures Railway never serves stale cached src files.
 COPY src/ ./src/
+COPY start.sh ./
 
 RUN mkdir -p /app/logs && chown -R solsystems:nodejs /app/logs
 
