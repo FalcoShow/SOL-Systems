@@ -1,0 +1,50 @@
+# ============================================================
+#  SOL SYSTEMS — Docker Ignore
+#  File: .dockerignore
+#
+#  Prevents these paths from being sent to the Docker build
+#  context. Smaller context = faster builds.
+#  Secrets and dev files MUST be excluded.
+# ============================================================
+
+# ── Secrets — NEVER copy into image ──────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Dependencies — reinstalled inside container ───────────────
+node_modules/
+dashboard/node_modules/
+
+# ── Dashboard — not needed in the bot container ───────────────
+dashboard/
+
+# ── Git ───────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── Logs — runtime generated, not build artifacts ─────────────
+logs/
+*.log
+
+# ── Dev / test files ─────────────────────────────────────────
+debug.js
+*.test.js
+*.spec.js
+__tests__/
+coverage/
+
+# ── OS / editor junk ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp
+*.swo
+
+# ── Docker itself ─────────────────────────────────────────────
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# ── Prisma migration history (schema.prisma IS included) ─────
+prisma/migrations/

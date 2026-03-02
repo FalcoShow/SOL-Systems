@@ -1,0 +1,51 @@
+# ============================================================
+#  SOL SYSTEMS — Railway Deployment Config
+#  File: railway.toml
+#
+#  Railway reads this file to know how to build and run
+#  the bot in the cloud. No manual Railway UI config needed
+#  after initial project creation.
+#
+#  Docs: https://docs.railway.app/reference/config-as-code
+# ============================================================
+
+[build]
+# Use our Dockerfile — Railway auto-detects it but explicit is safer
+builder        = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Startup command is defined in Dockerfile CMD.
+# healthcheckPath must match the public route in server.js
+# Note: /health has no auth requirement — /api/health does
+healthcheckPath         = "/health"
+healthcheckTimeout      = 30
+restartPolicyType       = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+
+# Number of replicas — keep at 1.
+# Running 2+ copies of the bot would cause duplicate trades.
+numReplicas = 1
+
+# ────────────────────────────────────────────────────────────
+#  ENVIRONMENT VARIABLES
+#  Set these in Railway dashboard → Variables tab.
+#  Listed here for documentation — values are NOT stored here.
+# ────────────────────────────────────────────────────────────
+#
+#  Required:
+#    DATABASE_URL          — Neon PostgreSQL connection string
+#    SOLANA_RPC_URL        — Helius mainnet RPC HTTP URL
+#    SOLANA_WS_URL         — Helius mainnet RPC WebSocket URL
+#    HELIUS_API_KEY        — Your Helius API key
+#    WALLET_PRIVATE_KEY    — Base58 private key of trading wallet
+#    TELEGRAM_BOT_TOKEN    — From @BotFather
+#    TELEGRAM_CHAT_ID      — Your personal Telegram chat ID
+#
+#  Optional:
+#    DASHBOARD_API_KEY     — Auth key for REST API + dashboard
+#    API_SECRET_KEY        — Legacy alias for DASHBOARD_API_KEY
+#    HELIUS_WEBHOOK_SECRET — HMAC secret for webhook verification
+#    BIRDEYE_API_KEY       — Fallback price feed for illiquid tokens
+#    LOG_LEVEL             — debug | info | warn | error (default: info)
+#    PORT                  — API server port (default: 3001)

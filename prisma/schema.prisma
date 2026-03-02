@@ -1,0 +1,311 @@
+// ============================================================
+//  SOL SYSTEMS — Prisma Database Schema
+//  File: prisma/schema.prisma
+//
+//  Tables:
+//    - TrackedWallet   : wallets being copied
+//    - WalletTrade     : raw trades detected on tracked wallets
+//    - Trade           : trades WE executed as copies
+//    - Settings        : global bot configuration
+//    - DailyPnL        : daily summary snapshots
+//    - NotificationLog : log of all Telegram messages sent
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ────────────────────────────────────────────────────────────
+//  TRACKED WALLET
+//  Every wallet address we are copying trades from
+// ────────────────────────────────────────────────────────────
+model TrackedWallet {
+  id                  String   @id @default(uuid())
+  address             String   @unique
+  nickname            String   // e.g. "Cented"
+  isActive            Boolean  @default(true)
+
+  // Capital estimation
+  // We analyze the wallet's history to estimate their total SOL capital
+  // This is used to calculate the scaling ratio against our capital
+  estimatedCapitalSOL Float    @default(0)
+  capitalUpdatedAt    DateTime?
+
+  // Manual override — if you know their exact capital, set it here
+  // If set, this takes priority over estimatedCapitalSOL
+  manualCapitalSOL    Float?
+
+  // Stats
+  totalTradesCopied   Int      @default(0)
+  totalWins           Int      @default(0)
+  totalLosses         Int      @default(0)
+  totalPnLSOL         Float    @default(0)
+
+  // Timestamps
+  addedAt             DateTime @default(now())
+  lastSeenAt          DateTime?
+  lastTradeAt         DateTime?
+
+  // Relations
+  walletTrades        WalletTrade[]
+  trades              Trade[]
+
+  @@index([address])
+  @@index([isActive])
+  @@map("tracked_wallets")
+}
+
+// ────────────────────────────────────────────────────────────
+//  WALLET TRADE
+//  A raw trade detected on the tracked wallet's address
+//  This is what THEY did — before we copy it
+// ────────────────────────────────────────────────────────────
+model WalletTrade {
+  id                  String   @id @default(uuid())
+
+  // Which wallet made this trade
+  trackedWalletId     String
+  trackedWallet       TrackedWallet @relation(fields: [trackedWalletId], references: [id])
+
+  // Transaction details from Solana
+  txSignature         String   @unique
+  blockTime           DateTime
+  detectedAt          DateTime @default(now())
+
+  // Trade direction
+  tradeType           TradeType  // BUY or SELL
+
+  // Token being traded
+  tokenMint           String   // SPL token mint address
+  tokenSymbol         String?  // e.g. "WIF"
+  tokenName           String?  // e.g. "dogwifhat"
+
+  // Amounts
+  amountSOL           Float    // SOL spent (BUY) or received (SELL)
+  amountTokens        Float    // Token amount bought or sold
+  pricePerTokenSOL    Float    // Price per token in SOL at execution
+  pricePerTokenUSD    Float?   // Price per token in USD (fetched separately)
+
+  // Position tracking
+  // For SELLs, links back to the original BUY trade for PnL calculation
+  entryTradeId        String?
+
+  // PnL (only populated for SELL trades)
+  pnlSOL              Float?
+  pnlUSD              Float?
+  pnlPct              Float?   // e.g. 220.1 means +220.1%
+  isWin               Boolean?
+
+  // Estimated capital of tracked wallet at time of this trade
+  // Used to calculate our scaling ratio
+  trackedCapitalSOL   Float?
+
+  // The copy trade WE executed in response to this
+  myTrade             Trade?
+
+  @@index([trackedWalletId])
+  @@index([txSignature])
+  @@index([blockTime])
+  @@index([tokenMint])
+  @@map("wallet_trades")
+}
+
+// ────────────────────────────────────────────────────────────
+//  TRADE
+//  A trade WE executed as a copy of a tracked wallet trade
+// ────────────────────────────────────────────────────────────
+model Trade {
+  id                  String   @id @default(uuid())
+
+  // Which tracked wallet triggered this copy trade
+  trackedWalletId     String
+  trackedWallet       TrackedWallet @relation(fields: [trackedWalletId], references: [id])
+
+  // The original wallet trade we are copying
+  walletTradeId       String   @unique
+  walletTrade         WalletTrade @relation(fields: [walletTradeId], references: [id])
+
+  // Transaction details for OUR execution
+  txSignature         String?  @unique  // null until confirmed
+  status              TradeStatus @default(PENDING)
+  tradeType           TradeType   // BUY or SELL
+
+  // Token
+  tokenMint           String
+  tokenSymbol         String?
+  tokenName           String?
+
+  // Position sizing
+  myCapitalSOL        Float    // Our total capital at time of trade
+  trackedCapitalSOL   Float    // Tracked wallet's estimated capital
+  scalingRatio        Float    // myCapital / trackedCapital
+  requestedAmountSOL  Float    // What we calculated we should spend
+  executedAmountSOL   Float?   // What we actually spent (after slippage)
+  amountTokens        Float?   // Tokens received or sold
+
+  // Prices
+  requestedPriceSOL   Float?   // Quote price before execution
+  executedPriceSOL    Float?   // Actual fill price
+  executedPriceUSD    Float?
+  slippagePct         Float?   // Actual slippage experienced
+
+  // Timing — critical for measuring copy speed
+  detectedAt          DateTime // When we detected the tracked wallet's trade
+  submittedAt         DateTime? // When we submitted our tx to the network
+  confirmedAt         DateTime? // When our tx was confirmed on-chain
+  executionMs         Int?     // Total milliseconds from detect to confirm
+
+  // PnL (only for SELL trades, or when position is closed)
+  entryTradeId        String?  // Links to our original BUY trade for this token
+  pnlSOL              Float?
+  pnlUSD              Float?
+  pnlPct              Float?   // Our actual PnL percentage
+  trackedPnlPct       Float?   // The tracked wallet's PnL percentage for comparison
+  pnlDeviation        Float?   // Difference between our % and their % (accuracy metric)
+  isWin               Boolean?
+  isOpen              Boolean  @default(true)
+
+  // Error info if trade failed
+  errorMessage        String?
+  retryCount          Int      @default(0)
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([trackedWalletId])
+  @@index([tokenMint])
+  @@index([status])
+  @@index([isOpen])
+  @@index([createdAt])
+  @@map("trades")
+}
+
+// ────────────────────────────────────────────────────────────
+//  SETTINGS
+//  Global bot configuration — single row, updated via dashboard
+//  or Telegram commands
+// ────────────────────────────────────────────────────────────
+model Settings {
+  id                    String   @id @default("global")  // Always one row
+
+  // Capital
+  myCapitalSOL          Float    @default(10.0)
+
+  // Risk management
+  maxPositionPct        Float    @default(0.10)    // Max 10% per trade
+  minSolReserve         Float    @default(0.1)     // Always keep this much for gas
+  maxOpenPositions      Int      @default(10)
+  dailyLossLimitSOL     Float    @default(2.0)     // 0 = disabled
+  maxSlippageBps        Int      @default(100)     // 1%
+  maxPriceImpactPct     Float    @default(5.0)
+
+  // System state
+  isTradingPaused       Boolean  @default(false)
+  pauseReason           String?
+  pausedAt              DateTime?
+
+  // Telegram notification preferences
+  notifyOnBuy           Boolean  @default(true)
+  notifyOnSell          Boolean  @default(true)
+  notifyOnError         Boolean  @default(true)
+  notifyDailyReport     Boolean  @default(true)
+  dailyReportHourUTC    Int      @default(0)       // Hour to send daily report (0 = midnight UTC)
+
+  updatedAt             DateTime @updatedAt
+
+  @@map("settings")
+}
+
+// ────────────────────────────────────────────────────────────
+//  DAILY PNL
+//  Snapshot of each day's trading performance
+//  Auto-generated by the daily cron job at midnight UTC
+// ────────────────────────────────────────────────────────────
+model DailyPnL {
+  id                  String   @id @default(uuid())
+  date                String   @unique  // Format: "2024-03-01"
+
+  // Totals
+  totalTradesExecuted Int      @default(0)
+  totalWins           Int      @default(0)
+  totalLosses         Int      @default(0)
+  winRatePct          Float    @default(0)
+
+  // Financial summary
+  grossPnLSOL         Float    @default(0)  // Before fees
+  feesSOL             Float    @default(0)  // Transaction fees paid
+  netPnLSOL           Float    @default(0)  // After fees
+  netPnLUSD           Float?
+  roiPct              Float    @default(0)  // Net PnL / starting capital * 100
+
+  // Best and worst trade of the day
+  bestTradeId         String?
+  bestTradePnLSOL     Float?
+  bestTradePnLPct     Float?
+  worstTradeId        String?
+  worstTradePnLSOL    Float?
+  worstTradePnLPct    Float?
+
+  // Capital snapshot at end of day
+  endingCapitalSOL    Float?
+
+  generatedAt         DateTime @default(now())
+
+  @@index([date])
+  @@map("daily_pnl")
+}
+
+// ────────────────────────────────────────────────────────────
+//  NOTIFICATION LOG
+//  Every Telegram message the bot sends, logged for audit trail
+// ────────────────────────────────────────────────────────────
+model NotificationLog {
+  id          String   @id @default(uuid())
+  type        NotificationType
+  message     String
+  tradeId     String?
+  sentAt      DateTime @default(now())
+  success     Boolean  @default(true)
+  errorMsg    String?
+
+  @@index([type])
+  @@index([sentAt])
+  @@map("notification_logs")
+}
+
+// ────────────────────────────────────────────────────────────
+//  ENUMS
+// ────────────────────────────────────────────────────────────
+enum TradeType {
+  BUY
+  SELL
+}
+
+enum TradeStatus {
+  PENDING      // Queued, not yet submitted
+  SUBMITTED    // Sent to network, awaiting confirmation
+  CONFIRMED    // On-chain confirmed
+  FAILED       // Transaction failed or rejected
+  SKIPPED      // Risk manager decided to skip this trade
+}
+
+enum NotificationType {
+  BUY_EXECUTED
+  SELL_EXECUTED
+  TRADE_FAILED
+  TRADE_SKIPPED
+  DAILY_REPORT
+  SYSTEM_ONLINE
+  SYSTEM_PAUSED
+  SYSTEM_RESUMED
+  LOSS_LIMIT_HIT
+  WALLET_ADDED
+  WALLET_REMOVED
+  ERROR_ALERT
+}

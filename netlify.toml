@@ -1,0 +1,76 @@
+# ============================================================
+#  SOL SYSTEMS — Netlify Deployment Config
+#  File: netlify.toml
+#
+#  Deploys the React dashboard (dashboard/) to Netlify CDN.
+#  The bot backend runs on Railway — this config tells the
+#  dashboard where to find it via environment variables.
+#
+#  Setup steps:
+#    1. Push repo to GitHub
+#    2. netlify.com → New site → Import from GitHub
+#    3. Netlify auto-detects this file — no manual config
+#    4. Set environment variables in Netlify UI → Site Settings
+#       → Environment Variables:
+#         VITE_API_URL  = https://your-app.up.railway.app
+#         VITE_WS_URL   = wss://your-app.up.railway.app/ws
+#         VITE_API_KEY  = your_api_secret_key
+#    5. Trigger deploy — dashboard live in ~60 seconds
+# ============================================================
+
+# ────────────────────────────────────────────────────────────
+#  BUILD SETTINGS
+# ────────────────────────────────────────────────────────────
+
+[build]
+# Netlify runs commands from repo root by default.
+# base tells it to cd into dashboard/ first.
+base    = "dashboard"
+command = "npm install && npm run build"
+publish = "dashboard/dist"
+
+[build.environment]
+NODE_VERSION = "20"
+NPM_VERSION  = "10"
+
+# ────────────────────────────────────────────────────────────
+#  SINGLE-PAGE APP ROUTING
+#  Without this, refreshing /trades returns a 404 because
+#  Netlify looks for a real file at that path.
+#  The rewrite sends all routes to index.html and React
+#  Router handles the client-side routing.
+# ────────────────────────────────────────────────────────────
+
+[[redirects]]
+from   = "/*"
+to     = "/index.html"
+status = 200
+
+# ────────────────────────────────────────────────────────────
+#  SECURITY HEADERS
+# ────────────────────────────────────────────────────────────
+
+[[headers]]
+for = "/*"
+  [headers.values]
+  # Prevents clickjacking
+  X-Frame-Options = "DENY"
+  # Stops MIME-type sniffing
+  X-Content-Type-Options = "nosniff"
+  # Forces HTTPS
+  Strict-Transport-Security = "max-age=31536000; includeSubDomains"
+  # Restricts what the page can load
+  Content-Security-Policy = """
+    default-src 'self';
+    script-src 'self' 'unsafe-inline';
+    style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+    font-src 'self' https://fonts.gstatic.com;
+    connect-src 'self' https://*.up.railway.app wss://*.up.railway.app;
+    img-src 'self' data:;
+  """
+
+# Cache static assets aggressively — hashed filenames change on rebuild
+[[headers]]
+for = "/assets/*"
+  [headers.values]
+  Cache-Control = "public, max-age=31536000, immutable"

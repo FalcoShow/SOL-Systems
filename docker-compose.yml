@@ -1,0 +1,91 @@
+# ============================================================
+#  SOL SYSTEMS — Docker Compose
+#  File: docker-compose.yml
+#
+#  Local development environment. Spins up:
+#    - app       : The Node.js copy trading bot
+#    - postgres  : Local PostgreSQL database
+#
+#  Usage:
+#    Start:   docker compose up -d
+#    Logs:    docker compose logs -f app
+#    Stop:    docker compose down
+#    Reset DB: docker compose down -v && docker compose up -d
+#
+#  NOTE: Never use this file in production.
+#  Production runs as a single container on Railway.
+#  This is purely for local testing before you deploy.
+# ============================================================
+
+version: '3.9'
+
+services:
+
+  # ── PostgreSQL database ───────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: solsystems-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     solsystems
+      POSTGRES_PASSWORD: solsystems_dev
+      POSTGRES_DB:       solsystems
+    ports:
+      - '5432:5432'       # Expose to localhost so Prisma Studio works
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:     ['CMD-SHELL', 'pg_isready -U solsystems']
+      interval: 10s
+      timeout:  5s
+      retries:  5
+
+  # ── SOL Systems bot ───────────────────────────────────────
+  app:
+    build:
+      context:    .
+      dockerfile: Dockerfile
+      target:     runner       # Use the production stage
+    container_name: solsystems-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV:    development
+      DATABASE_URL: postgresql://solsystems:solsystems_dev@postgres:5432/solsystems
+
+      # ── Copy these from your .env file ──────────────────
+      # These are NOT stored here — fill them in or use
+      # an .env file with: docker compose --env-file .env up
+      SOLANA_RPC_URL:        ${SOLANA_RPC_URL}
+      SOLANA_WS_URL:         ${SOLANA_WS_URL}
+      HELIUS_API_KEY:        ${HELIUS_API_KEY}
+      WALLET_PRIVATE_KEY:    ${WALLET_PRIVATE_KEY}
+      WALLET_PUBLIC_KEY:     ${WALLET_PUBLIC_KEY}
+      TELEGRAM_BOT_TOKEN:    ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID:      ${TELEGRAM_CHAT_ID}
+      DASHBOARD_API_KEY:     ${DASHBOARD_API_KEY}
+      HELIUS_WEBHOOK_SECRET: ${HELIUS_WEBHOOK_SECRET:-}
+      BIRDEYE_API_KEY:       ${BIRDEYE_API_KEY:-}
+      LOG_LEVEL:             ${LOG_LEVEL:-info}
+      PORT:                  3001
+
+    ports:
+      - '3001:3001'       # REST API + WebSocket
+
+    volumes:
+      # Mount logs directory so you can read them from host
+      - ./logs:/app/logs
+
+    healthcheck:
+      test:         ['CMD-SHELL', 'wget -qO- http://localhost:3001/health || exit 1']
+      interval:     30s
+      timeout:      10s
+      start_period: 40s    # Give Prisma db push time to run
+      retries:      3
+
+# ── Named volumes ─────────────────────────────────────────────
+volumes:
+  postgres_data:
+    driver: local
