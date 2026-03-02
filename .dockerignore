@@ -1,10 +1,6 @@
 # ============================================================
 #  SOL SYSTEMS — Docker Ignore
 #  File: .dockerignore
-#
-#  Prevents these paths from being sent to the Docker build
-#  context. Smaller context = faster builds.
-#  Secrets and dev files MUST be excluded.
 # ============================================================
 
 # ── Secrets — NEVER copy into image ──────────────────────────
@@ -27,14 +23,14 @@ dashboard/
 logs/
 *.log
 
-# ── Dev / test files ─────────────────────────────────────────
+# ── Dev / test files ──────────────────────────────────────────
 debug.js
 *.test.js
 *.spec.js
 __tests__/
 coverage/
 
-# ── OS / editor junk ─────────────────────────────────────────
+# ── OS / editor junk ──────────────────────────────────────────
 .DS_Store
 Thumbs.db
 .vscode/
@@ -46,5 +42,6 @@ Dockerfile
 docker-compose.yml
 .dockerignore
 
-# ── Prisma migration history (schema.prisma IS included) ─────
-prisma/migrations/
+# NOTE: prisma/migrations/ is intentionally NOT excluded.
+# The migration SQL files must be present in the container
+# for `prisma migrate deploy` to run on startup.
