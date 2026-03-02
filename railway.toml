@@ -18,7 +18,7 @@ dockerfilePath = "Dockerfile"
 # --skip-generate prevents prisma from trying to write to node_modules
 # at runtime (already generated during Docker build step).
 # migrate deploy is safe to run on every start — idempotent.
-startCommand            = "npx prisma migrate deploy --skip-generate && node src/index.js"
+startCommand            = "npx prisma migrate deploy && node src/index.js"
 healthcheckPath         = "/health"
 healthcheckTimeout      = 60
 restartPolicyType       = "ON_FAILURE"
