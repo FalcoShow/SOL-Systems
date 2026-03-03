@@ -68,13 +68,8 @@ async function getTopTraders() {
   logger.info('[GMGN] Fetching top traders from leaderboard...');
 
   try {
-    // Try primary endpoint first
-    let leaders = await _fetchLeaderboard();
-
-    if (!leaders || leaders.length === 0) {
-      logger.debug('[GMGN] Primary leaderboard empty, trying alternate...');
-      leaders = await _fetchLeaderboardAlternate();
-    }
+    // Fetch leaderboard — tries all base URLs × paths × retries
+    const leaders = await _fetchLeaderboard();
 
     if (!leaders || leaders.length === 0) {
       logger.warn('[GMGN] All leaderboard endpoints returned no data');

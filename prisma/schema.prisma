@@ -350,6 +350,7 @@ enum NotificationType {
   ERROR_ALERT
   INTELLIGENCE_REPORT
   INTELLIGENCE_FAILED
+  RAW
 }
 
 enum IntelligenceStatus {
