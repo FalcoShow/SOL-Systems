@@ -50,11 +50,11 @@ const TOP_N = 15;
 const MAX_WALLETS = 20;
 
 // Hard disqualifier thresholds
-const MIN_WIN_RATE        = 5;    // Below 5% = no usable signal
+const MIN_WIN_RATE        = 0;    // Allow wallets where win rate couldn't be calculated
 const MAX_TRADES_PER_DAY  = 500;  // Above this = bot
-const MAX_DORMANT_HOURS   = 48;   // Inactive > 48h = skip
-const MIN_DATA_QUALITY    = 30;   // Below 30 = not enough data
-const MIN_TRADES_7D       = 3;    // Need at least 3 trades in 7 days
+const MAX_DORMANT_HOURS   = 72;   // Inactive > 72h = skip
+const MIN_DATA_QUALITY    = 20;   // Below 20 = not enough data
+const MIN_TRADES_7D       = 2;    // Need at least 2 trades in 7 days
 
 // Scoring weight config — must sum to 1.0
 const WEIGHTS = {
@@ -226,66 +226,70 @@ function _mergeAndDeduplicate(wallets) {
  * @private
  */
 function _passesDisqualifiers(wallet) {
+  const addr = wallet.address?.slice(0, 8) + '...';
+
   // Must have an address
   if (!wallet.address) return false;
 
   // Must have enough data to make a decision
-  if (wallet.dataQuality < MIN_DATA_QUALITY) {
-    logger.debug('[Aggregator] Disqualified: low data quality', {
-      address: wallet.address.slice(0, 8) + '...',
-      quality: wallet.dataQuality,
+  if ((wallet.dataQuality || 0) < MIN_DATA_QUALITY) {
+    logger.info('[Aggregator] Disqualified: low data quality', {
+      address: addr, quality: wallet.dataQuality, min: MIN_DATA_QUALITY,
     });
     return false;
   }
 
-  // Must have calculable win rate
-  if (wallet.winRatePct < MIN_WIN_RATE) {
-    logger.debug('[Aggregator] Disqualified: win rate too low', {
-      address: wallet.address.slice(0, 8) + '...',
-      winRate: wallet.winRatePct,
+  // Must have calculable win rate (only enforce if we have enough trades to judge)
+  if ((wallet.totalTrades7d || 0) >= 10 && (wallet.winRatePct || 0) < MIN_WIN_RATE) {
+    logger.info('[Aggregator] Disqualified: win rate too low', {
+      address: addr, winRate: wallet.winRatePct, trades: wallet.totalTrades7d,
     });
     return false;
   }
 
-  // Must have recent activity
+  // Must have recent activity (skip check if no lastActiveAt data)
   if (wallet.lastActiveAt) {
     const hoursSince = (Date.now() - new Date(wallet.lastActiveAt).getTime())
       / (1000 * 60 * 60);
     if (hoursSince > MAX_DORMANT_HOURS) {
-      logger.debug('[Aggregator] Disqualified: dormant wallet', {
-        address:    wallet.address.slice(0, 8) + '...',
-        hoursSince: Math.round(hoursSince),
+      logger.info('[Aggregator] Disqualified: dormant wallet', {
+        address: addr, hoursSince: Math.round(hoursSince), max: MAX_DORMANT_HOURS,
       });
       return false;
     }
   }
 
   // Must have minimum trade activity
-  if (wallet.totalTrades7d < MIN_TRADES_7D) {
-    logger.debug('[Aggregator] Disqualified: insufficient trades', {
-      address: wallet.address.slice(0, 8) + '...',
-      trades7d: wallet.totalTrades7d,
+  if ((wallet.totalTrades7d || 0) < MIN_TRADES_7D) {
+    logger.info('[Aggregator] Disqualified: insufficient trades', {
+      address: addr, trades7d: wallet.totalTrades7d, min: MIN_TRADES_7D,
     });
     return false;
   }
 
   // Bot detection: too many trades per day
-  if (wallet.tradesPerDay > MAX_TRADES_PER_DAY) {
-    logger.debug('[Aggregator] Disqualified: likely bot', {
-      address:     wallet.address.slice(0, 8) + '...',
-      tradesPerDay: wallet.tradesPerDay,
+  if ((wallet.tradesPerDay || 0) > MAX_TRADES_PER_DAY) {
+    logger.info('[Aggregator] Disqualified: likely bot', {
+      address: addr, tradesPerDay: wallet.tradesPerDay,
     });
     return false;
   }
 
   // Farmer detection: trades concentrated in very few tokens
-  // A human trader diversifies; a farmer spams one token
-  if (wallet.topTokens && wallet.topTokens.length === 1 && wallet.totalTrades7d > 20) {
-    logger.debug('[Aggregator] Disqualified: single-token farmer', {
-      address: wallet.address.slice(0, 8) + '...',
-    });
+  if (wallet.topTokens && wallet.topTokens.length === 1 && (wallet.totalTrades7d || 0) > 20) {
+    logger.info('[Aggregator] Disqualified: single-token farmer', { address: addr });
     return false;
   }
+
+  // Log wallets that pass for visibility
+  logger.info('[Aggregator] Wallet PASSED filters', {
+    address: addr,
+    source: wallet.source,
+    quality: wallet.dataQuality,
+    winRate: wallet.winRatePct,
+    trades7d: wallet.totalTrades7d,
+    tpd: wallet.tradesPerDay,
+  });
 
   return true;
 }

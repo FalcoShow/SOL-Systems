@@ -205,20 +205,27 @@ async function _fetchGainersLeaderboard(apiKey) {
       }
     } catch (err) {
       const status = err.response?.status;
-      logger.debug('[Birdeye] Leaderboard attempt failed', {
+      const body   = err.response?.data;
+      logger.info('[Birdeye] Leaderboard attempt failed', {
         type,
         status: status || 'network',
         error:  err.message,
+        body:   typeof body === 'string' ? body.slice(0, 200) : JSON.stringify(body)?.slice(0, 200),
       });
 
       // 429 = rate limited — wait 3s before next attempt
       if (status === 429) {
         await _sleep(3000);
       }
+      // 401/403 = endpoint not available on this plan — stop trying
+      if (status === 401 || status === 403) {
+        logger.warn('[Birdeye] Leaderboard endpoint not available on current plan');
+        break;
+      }
     }
   }
 
-  logger.warn('[Birdeye] All leaderboard timeframes failed');
+  logger.warn('[Birdeye] All leaderboard timeframes failed — endpoint may require Premium+ plan');
   return [];
 }
 

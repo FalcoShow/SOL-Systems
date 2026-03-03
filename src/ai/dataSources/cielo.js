@@ -145,57 +145,74 @@ async function getTopTraders() {
  */
 async function _discoverWalletsFromFeed(apiKey) {
   try {
-    // First try with swap filter, then fall back to all tx types
+    // Try multiple param combos — narrow first, then progressively broader
     const paramSets = [
       { chains: 'solana', txTypes: 'swap', minUSD: MIN_SWAP_USD, limit: 100 },
-      { chains: 'solana', minUSD: MIN_SWAP_USD, limit: 100 },
+      { chains: 'solana', txTypes: 'swap', limit: 100 },           // drop minUSD
+      { chains: 'solana', limit: 100 },                             // drop txTypes too
     ];
 
     let items = [];
 
     for (const params of paramSets) {
-      const response = await axios.get(`${CIELO_BASE}/feed`, {
-        params,
-        headers: _headers(apiKey),
-        timeout: REQUEST_TIMEOUT,
-      });
+      try {
+        const response = await axios.get(`${CIELO_BASE}/feed`, {
+          params,
+          headers: _headers(apiKey),
+          timeout: REQUEST_TIMEOUT,
+        });
 
-      // Cielo returns { status, data: { items: [...], paging: {...} }, message }
-      // response.data is the axios body, response.data.data is the API "data" field
-      const body = response.data;
-      items = body?.data?.items
-           || body?.items
-           || (Array.isArray(body?.data) ? body.data : [])
-           || [];
+        // Cielo returns { status, data: { items: [...], paging: {...} }, message }
+        // response.data is the axios body, response.data.data is the API "data" field
+        const body = response.data;
+        items = body?.data?.items
+             || body?.items
+             || (Array.isArray(body?.data) ? body.data : [])
+             || [];
 
-      // Log actual response shape for debugging
-      logger.debug('[Cielo] Feed response shape', {
-        topKeys:     Object.keys(body || {}),
-        dataType:    typeof body?.data,
-        dataKeys:    body?.data ? Object.keys(body.data).slice(0, 8) : 'N/A',
-        itemCount:   Array.isArray(items) ? items.length : 'not-array',
-        firstItem:   Array.isArray(items) && items[0]
-          ? Object.keys(items[0]).slice(0, 10)
-          : 'N/A',
-        params:      Object.keys(params),
-      });
+        // Log actual response shape at INFO level so we can debug in production
+        logger.info('[Cielo] Feed response shape', {
+          status:      body?.status,
+          message:     body?.message || 'N/A',
+          topKeys:     Object.keys(body || {}),
+          dataType:    typeof body?.data,
+          dataKeys:    body?.data && typeof body.data === 'object' ? Object.keys(body.data).slice(0, 8) : 'N/A',
+          itemCount:   Array.isArray(items) ? items.length : 'not-array',
+          firstItemKeys: Array.isArray(items) && items[0]
+            ? Object.keys(items[0]).slice(0, 15)
+            : 'none',
+          firstItemSample: Array.isArray(items) && items[0]
+            ? JSON.stringify(items[0]).slice(0, 300)
+            : 'N/A',
+          params,
+        });
 
-      if (Array.isArray(items) && items.length > 0) break;
+        if (Array.isArray(items) && items.length > 0) break;
+      } catch (err) {
+        logger.info('[Cielo] Feed request failed for param set', {
+          params,
+          status: err.response?.status,
+          error:  err.message,
+          body:   JSON.stringify(err.response?.data)?.slice(0, 200),
+        });
+      }
 
       // Small delay before trying next param set
       await _sleep(500);
     }
 
     if (!Array.isArray(items) || items.length === 0) {
-      logger.debug('[Cielo] Feed returned empty results after all param sets');
+      logger.info('[Cielo] Feed returned empty results after all param sets');
       return [];
     }
 
     // Extract unique wallet addresses with stats from feed items
-    // Cielo feed items use "wallet" as the primary address field
+    // Cielo feed items may use various field names for the wallet address
     const walletMap = new Map(); // addr → { count, totalUSD, tokens, lastSeen }
     for (const item of items) {
-      const addr = item.wallet || item.wallet_address || item.from || item.address || item.sender;
+      const addr = item.wallet || item.wallet_address || item.from_address
+                || item.from || item.address || item.sender || item.owner
+                || item.maker || item.maker_address || item.trader;
       if (!addr || typeof addr !== 'string' || addr.length < 30) continue;
 
       const usdValue = parseFloat(
@@ -225,7 +242,17 @@ async function _discoverWalletsFromFeed(apiKey) {
     logger.info('[Cielo] Wallets extracted from feed', {
       totalItems:    items.length,
       uniqueWallets: walletMap.size,
+      sampleAddrs:   [...walletMap.keys()].slice(0, 3).map(a => a.slice(0, 8) + '...'),
     });
+
+    // If we got items but no wallet addresses, log the field names so we can fix extraction
+    if (items.length > 0 && walletMap.size === 0) {
+      logger.warn('[Cielo] Got feed items but could not extract wallet addresses!', {
+        itemCount:   items.length,
+        sampleKeys:  items[0] ? Object.keys(items[0]) : [],
+        sampleItem:  items[0] ? JSON.stringify(items[0]).slice(0, 400) : 'N/A',
+      });
+    }
 
     // Sort by frequency (most active first) and return top N with feed stats
     return [...walletMap.entries()]

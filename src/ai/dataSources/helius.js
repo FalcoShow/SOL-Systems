@@ -368,50 +368,90 @@ function _calculateStats(txs, walletAddr) {
   let losses = 0;
   let holdTimes = [];
   let solAmounts = [];
+  let parsedSwaps = 0;
 
   for (const tx of sorted) {
+    // Primary path: events.swap (Helius Enhanced format)
     const swap = tx.events?.swap;
-    if (!swap) continue;
 
-    // Determine if this is a BUY (SOL→Token) or SELL (Token→SOL)
-    const isBuy  = swap.nativeInput && swap.nativeInput.amount > 0;
-    const isSell = swap.nativeOutput && swap.nativeOutput.amount > 0;
+    if (swap) {
+      parsedSwaps++;
+      const isBuy  = swap.nativeInput && swap.nativeInput.amount > 0;
+      const isSell = swap.nativeOutput && swap.nativeOutput.amount > 0;
 
-    if (isBuy) {
-      const solSpent = swap.nativeInput.amount / 1e9;
-      solAmounts.push(solSpent);
-
-      // Get the token mint from output
-      const outputMint = swap.tokenOutputs?.[0]?.mint
-        || swap.innerSwaps?.[0]?.tokenOutputs?.[0]?.mint;
-      if (outputMint && outputMint !== SOL_MINT) {
-        buys.set(outputMint, { timestamp: tx.timestamp, solAmount: solSpent });
+      if (isBuy) {
+        const solSpent = swap.nativeInput.amount / 1e9;
+        solAmounts.push(solSpent);
+        const outputMint = swap.tokenOutputs?.[0]?.mint
+          || swap.innerSwaps?.[0]?.tokenOutputs?.[0]?.mint;
+        if (outputMint && outputMint !== SOL_MINT) {
+          buys.set(outputMint, { timestamp: tx.timestamp, solAmount: solSpent });
+        }
       }
+
+      if (isSell) {
+        const solReceived = swap.nativeOutput.amount / 1e9;
+        solAmounts.push(solReceived);
+        const inputMint = swap.tokenInputs?.[0]?.mint
+          || swap.innerSwaps?.[0]?.tokenInputs?.[0]?.mint;
+        if (inputMint && inputMint !== SOL_MINT && buys.has(inputMint)) {
+          const buy = buys.get(inputMint);
+          const pnl = solReceived - buy.solAmount;
+          if (pnl > 0) wins++;
+          else losses++;
+          if (tx.timestamp > buy.timestamp) {
+            holdTimes.push((tx.timestamp - buy.timestamp) * 1000);
+          }
+          buys.delete(inputMint);
+        }
+      }
+      continue;
     }
 
-    if (isSell) {
-      const solReceived = swap.nativeOutput.amount / 1e9;
+    // Fallback path: use nativeTransfers + tokenTransfers when events.swap is missing
+    const nativeXfers = tx.nativeTransfers || [];
+    const tokenXfers  = tx.tokenTransfers || [];
+    if (nativeXfers.length === 0 && tokenXfers.length === 0) continue;
+    parsedSwaps++;
+
+    // Detect BUY: wallet sent SOL, received tokens
+    const solSent = nativeXfers
+      .filter(nt => nt.fromUserAccount === walletAddr)
+      .reduce((sum, nt) => sum + (nt.amount || 0), 0) / 1e9;
+    const solReceived = nativeXfers
+      .filter(nt => nt.toUserAccount === walletAddr)
+      .reduce((sum, nt) => sum + (nt.amount || 0), 0) / 1e9;
+    const tokensReceived = tokenXfers
+      .filter(tt => tt.toUserAccount === walletAddr && tt.mint !== SOL_MINT);
+    const tokensSent = tokenXfers
+      .filter(tt => tt.fromUserAccount === walletAddr && tt.mint !== SOL_MINT);
+
+    if (solSent > 0.001 && tokensReceived.length > 0) {
+      // BUY: SOL → Token
+      solAmounts.push(solSent);
+      const mint = tokensReceived[0].mint;
+      if (mint) buys.set(mint, { timestamp: tx.timestamp, solAmount: solSent });
+    } else if (solReceived > 0.001 && tokensSent.length > 0) {
+      // SELL: Token → SOL
       solAmounts.push(solReceived);
-
-      // Get the token mint from input
-      const inputMint = swap.tokenInputs?.[0]?.mint
-        || swap.innerSwaps?.[0]?.tokenInputs?.[0]?.mint;
-
-      if (inputMint && inputMint !== SOL_MINT && buys.has(inputMint)) {
-        const buy = buys.get(inputMint);
+      const mint = tokensSent[0].mint;
+      if (mint && buys.has(mint)) {
+        const buy = buys.get(mint);
         const pnl = solReceived - buy.solAmount;
-
         if (pnl > 0) wins++;
         else losses++;
-
-        // Hold time in ms
         if (tx.timestamp > buy.timestamp) {
           holdTimes.push((tx.timestamp - buy.timestamp) * 1000);
         }
-        buys.delete(inputMint);
+        buys.delete(mint);
       }
     }
   }
+
+  logger.debug('[Helius] Stats calculation', {
+    wallet: walletAddr.slice(0, 8) + '...',
+    totalTxs: sorted.length, parsedSwaps, wins, losses,
+  });
 
   const total       = wins + losses;
   const winRatePct  = total > 0 ? (wins / total) * 100 : 0;
