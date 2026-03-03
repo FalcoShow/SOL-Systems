@@ -251,15 +251,24 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
   }
 
   // ── Scale position size ───────────────────────────────────
-  const scaling = scalePositionSize(
-    trackedAmountSOL,
-    trackedCapitalSOL || (trackedAmountSOL * 10), // fallback: assume trade is ~10% of cap
-    myCapitalSOL,
-    settings.maxPositionPct,
-    settings.minSolReserve
-  );
+  const scaling = scalePositionSize({
+    trackedBuyAmountSOL:    trackedAmountSOL,
+    trackedWalletCapitalSOL: trackedCapitalSOL || (trackedAmountSOL * 10), // fallback: assume trade is ~10% of cap
+    settings: {
+      myCapitalSOL,
+      maxPositionPct:   settings.maxPositionPct,
+      minSolReserve:    settings.minSolReserve,
+      maxOpenPositions: settings.maxOpenPositions,
+    },
+    currentOpenPositions: positionTracker.getMyOpenPositionCount(),
+  });
 
-  if (!scaling.isViable) {
+  // Compute supplementary ratios for logging and DB records
+  const effectiveTrackedCap = trackedCapitalSOL || (trackedAmountSOL * 10);
+  const scalingRatio        = myCapitalSOL / effectiveTrackedCap;
+  const trackedPositionPct  = trackedAmountSOL / effectiveTrackedCap;
+
+  if (scaling.skip) {
     logger.warn('Scaled position too small to execute', {
       wallet: nickname,
       token:  tokenSymbol,
@@ -275,7 +284,7 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
   const todayLossSOL        = await tradeRepository.getTodayLossSOL();
 
   const riskCheck = riskManager.checkBuy({
-    proposedPositionSOL: scaling.scaledPositionSOL,
+    proposedPositionSOL: scaling.positionSOL,
     settings,
     context: {
       currentSOLBalance,
@@ -327,7 +336,7 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
     tokenName,
     myCapitalSOL,
     trackedCapitalSOL,
-    scalingRatio:       scaling.scalingRatio,
+    scalingRatio,
     requestedAmountSOL: finalPositionSOL,
     requestedPriceSOL:  swapData.pricePerTokenSOL,
     detectedAt,
@@ -338,8 +347,8 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
   logger.info('Executing copy BUY', {
     token:       tokenSymbol,
     amountSOL:   finalPositionSOL.toFixed(4),
-    scalingRatio: scaling.scalingRatio.toFixed(4),
-    theirPct:    scaling.trackedPositionPct.toFixed(2) + '%',
+    scalingRatio: scalingRatio.toFixed(4),
+    theirPct:    (trackedPositionPct * 100).toFixed(2) + '%',
     ourPct:      scaling.positionPct.toFixed(2) + '%',
   });
 
@@ -414,7 +423,7 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
       priceSOL:      swapResult.actualPriceSOL,
       txSignature:   swapResult.signature,
       executionMs,
-      theirPct:      scaling.trackedPositionPct,
+      theirPct:      trackedPositionPct,
       ourPct:        scaling.positionPct,
     });
   }

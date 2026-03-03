@@ -265,7 +265,7 @@ async function _fetchJupiterPrices(mints) {
  * @returns {Promise<number|null>}
  */
 async function _fetchBirdeyePrice(mint) {
-  const apiKey = config.solana.birdeyeApiKey;
+  const apiKey = config.prices.birdeyeApiKey;
   if (!apiKey) return null;
 
   const [tokenRes, solRes] = await Promise.all([

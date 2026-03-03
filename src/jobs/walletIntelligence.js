@@ -163,7 +163,7 @@ async function runIntelligenceJob({ testOnly = false } = {}) {
     // ── Step 1: Get current capital ───────────────────────
     const [settings, liveBalance] = await Promise.allSettled([
       tradeRepository.getSettings(),
-      getSOLBalance(config.solana.walletPublicKey).catch(() => null),
+      getSOLBalance(config.wallet.publicKey).catch(() => null),
     ]);
 
     const settingsVal   = settings.status === 'fulfilled'  ? settings.value  : null;
