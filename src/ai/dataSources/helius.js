@@ -138,7 +138,7 @@ async function getTopTraders() {
           tradesPerDay:     stats.tradesPerDay,
           avgHoldTimeMs:    stats.avgHoldMs,
           estimatedCapSOL:  stats.estCapSOL,
-          topTokens:        [...discoveryStats.tokens].slice(0, 5),
+          topTokens:        [...new Set([...(stats.topTokens || []), ...discoveryStats.tokens])].slice(0, 5),
           lastActiveAt:     discoveryStats.lastSeen,
           smartMoneyLabel:  null,
           dataQuality:      stats.dataQuality,
@@ -364,6 +364,7 @@ function _calculateStats(txs, walletAddr) {
 
   // Track buys and pair with sells for PnL
   const buys = new Map(); // tokenMint → { timestamp, solAmount }
+  const tokensSeen = new Map(); // tokenMint → count (for diversity tracking)
   let wins = 0;
   let losses = 0;
   let holdTimes = [];
@@ -386,6 +387,7 @@ function _calculateStats(txs, walletAddr) {
           || swap.innerSwaps?.[0]?.tokenOutputs?.[0]?.mint;
         if (outputMint && outputMint !== SOL_MINT) {
           buys.set(outputMint, { timestamp: tx.timestamp, solAmount: solSpent });
+          tokensSeen.set(outputMint, (tokensSeen.get(outputMint) || 0) + 1);
         }
       }
 
@@ -394,6 +396,9 @@ function _calculateStats(txs, walletAddr) {
         solAmounts.push(solReceived);
         const inputMint = swap.tokenInputs?.[0]?.mint
           || swap.innerSwaps?.[0]?.tokenInputs?.[0]?.mint;
+        if (inputMint && inputMint !== SOL_MINT) {
+          tokensSeen.set(inputMint, (tokensSeen.get(inputMint) || 0) + 1);
+        }
         if (inputMint && inputMint !== SOL_MINT && buys.has(inputMint)) {
           const buy = buys.get(inputMint);
           const pnl = solReceived - buy.solAmount;
@@ -430,11 +435,15 @@ function _calculateStats(txs, walletAddr) {
       // BUY: SOL → Token
       solAmounts.push(solSent);
       const mint = tokensReceived[0].mint;
-      if (mint) buys.set(mint, { timestamp: tx.timestamp, solAmount: solSent });
+      if (mint) {
+        buys.set(mint, { timestamp: tx.timestamp, solAmount: solSent });
+        tokensSeen.set(mint, (tokensSeen.get(mint) || 0) + 1);
+      }
     } else if (solReceived > 0.001 && tokensSent.length > 0) {
       // SELL: Token → SOL
       solAmounts.push(solReceived);
       const mint = tokensSent[0].mint;
+      if (mint) tokensSeen.set(mint, (tokensSeen.get(mint) || 0) + 1);
       if (mint && buys.has(mint)) {
         const buy = buys.get(mint);
         const pnl = solReceived - buy.solAmount;
@@ -500,6 +509,12 @@ function _calculateStats(txs, walletAddr) {
     }
   }
 
+  // Top tokens by frequency (for diversity scoring)
+  const topTokens = [...tokensSeen.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([mint]) => mint);
+
   // Data quality score
   let quality = 40; // Base: we have first-party on-chain data
   if (total > 5)      quality += 20;
@@ -514,6 +529,7 @@ function _calculateStats(txs, walletAddr) {
     avgHoldMs:    Math.round(avgHoldMs),
     estCapSOL:    parseFloat(estCapSOL.toFixed(2)),
     pnl7dUSD:     parseFloat(pnl7dUSD.toFixed(2)),
+    topTokens,
     dataQuality:  Math.min(100, quality),
   };
 }
@@ -526,6 +542,7 @@ function _emptyStats() {
     avgHoldMs:    0,
     estCapSOL:    0,
     pnl7dUSD:     0,
+    topTokens:    [],
     dataQuality:  0,
   };
 }

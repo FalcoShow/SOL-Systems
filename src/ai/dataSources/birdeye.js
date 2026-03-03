@@ -176,7 +176,7 @@ async function _fetchGainersLeaderboard(apiKey) {
   // Try multiple timeframes — if one rate-limits, wait and try the next.
   // The free tier shares a 60 RPM account limit with priceSync,
   // so we space out calls to avoid 429s.
-  const timeframes = ['1W', '1M', 'today'];
+  const timeframes = ['1W', 'yesterday', 'today'];
 
   for (const type of timeframes) {
     try {
@@ -187,7 +187,7 @@ async function _fetchGainersLeaderboard(apiKey) {
             sort_by:   'PnL',
             sort_type: 'desc',
             offset:    0,
-            limit:     MAX_WALLETS,
+            limit:     Math.min(MAX_WALLETS, 10),  // Birdeye max is 10
           },
           headers: _headers(apiKey),
           timeout: REQUEST_TIMEOUT,
