@@ -18,6 +18,7 @@
 
 import { useState, useEffect, useRef, createContext, useContext, useCallback } from "react";
 import { BrowserRouter, Routes, Route, NavLink, useLocation } from "react-router-dom";
+import { SpeedInsights } from "@vercel/speed-insights/react";
 
 // Pages
 import Overview   from "./pages/Overview";
@@ -625,6 +626,7 @@ export default function App() {
           <Shell />
         </DataProvider>
       </BrowserRouter>
+      <SpeedInsights />
     </>
   );
 }
