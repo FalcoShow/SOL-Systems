@@ -150,35 +150,27 @@ transports.push(
 //  CREATE LOGGER INSTANCE
 // ────────────────────────────────────────────────────────────
 
+// Reuse the error transport for exceptions & rejections instead of
+// creating extra DailyRotateFile instances (reduces listener count).
+const errorTransport = transports.find((t) => t instanceof DailyRotateFile && t.level === 'error');
+
 const logger = winston.createLogger({
   levels,
   level: LOG_LEVEL,
   transports,
-  // Do not crash the app on unhandled logger errors
   exitOnError: false,
-  // Capture uncaught exceptions to error log
-  exceptionHandlers: [
-    new DailyRotateFile({
-      format: fileFormat,
-      dirname: logsDir,
-      filename: 'sol-systems-exceptions-%DATE%.log',
-      datePattern: 'YYYY-MM-DD',
-      maxFiles: '14d',
-      auditFile: path.join(logsDir, '.exception-log-audit.json'),
-    }),
-  ],
-  // Capture unhandled promise rejections to error log
-  rejectionHandlers: [
-    new DailyRotateFile({
-      format: fileFormat,
-      dirname: logsDir,
-      filename: 'sol-systems-rejections-%DATE%.log',
-      datePattern: 'YYYY-MM-DD',
-      maxFiles: '14d',
-      auditFile: path.join(logsDir, '.rejection-log-audit.json'),
-    }),
-  ],
+  exceptionHandlers: [errorTransport],
+  rejectionHandlers: [errorTransport],
 });
+
+// Raise maxListeners on DailyRotateFile transports to prevent
+// "MaxListenersExceededWarning" — Winston attaches many piped
+// stream listeners internally and 10 is not enough.
+for (const t of transports) {
+  if (t instanceof DailyRotateFile && typeof t.setMaxListeners === 'function') {
+    t.setMaxListeners(20);
+  }
+}
 
 // ────────────────────────────────────────────────────────────
 //  HELPER METHODS
