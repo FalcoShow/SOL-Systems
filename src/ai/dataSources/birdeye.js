@@ -172,73 +172,51 @@ async function getWalletStats(address) {
  * @private
  */
 async function _fetchGainersLeaderboard(apiKey) {
-  try {
-    // Birdeye trader leaderboard — top performers by PnL
-    const response = await axios.get(`${BIRDEYE_BASE}/trader/gainers-losers`, {
-      params: {
-        type:   'today',   // Options: today, 1W, 1M
-        sort_by: 'PnL',
-        sort_type: 'desc',
-        offset: 0,
-        limit:  MAX_WALLETS,
-      },
-      headers: _headers(apiKey),
-      timeout: REQUEST_TIMEOUT,
-    });
+  // Try multiple timeframes — if one rate-limits, wait and try the next.
+  // The free tier shares a 60 RPM account limit with priceSync,
+  // so we space out calls to avoid 429s.
+  const timeframes = ['1W', '1M', 'today'];
 
-    const items = response.data?.data?.items || [];
+  for (const type of timeframes) {
+    try {
+      const response = await axios.get(`${BIRDEYE_BASE}/trader/gainers-losers`, {
+        params: {
+          type,
+          sort_by:   'PnL',
+          sort_type: 'desc',
+          offset:    0,
+          limit:     MAX_WALLETS,
+        },
+        headers: _headers(apiKey),
+        timeout: REQUEST_TIMEOUT,
+      });
 
-    return items.map((item) => ({
-      address: item.address || item.owner,
-      pnl7d:   item.pnl     || 0,
-      pnl30d:  item.pnl     || 0,   // Birdeye today endpoint gives single PnL
-    }));
+      const items = response.data?.data?.items || [];
+      if (items.length > 0) {
+        logger.info('[Birdeye] Leaderboard fetched', { type, count: items.length });
+        return items.map((item) => ({
+          address: item.address || item.owner,
+          pnl7d:   item.pnl || 0,
+          pnl30d:  type === '1M' ? (item.pnl || 0) : 0,
+        }));
+      }
+    } catch (err) {
+      const status = err.response?.status;
+      logger.debug('[Birdeye] Leaderboard attempt failed', {
+        type,
+        status: status || 'network',
+        error:  err.message,
+      });
 
-  } catch (err) {
-    // Try alternate endpoint if primary fails
-    logger.debug('[Birdeye] Primary leaderboard failed, trying alternate', {
-      error: err.message,
-    });
-    return _fetchGainersAlternate(apiKey);
+      // 429 = rate limited — wait 3s before next attempt
+      if (status === 429) {
+        await _sleep(3000);
+      }
+    }
   }
-}
 
-/**
- * Alternate leaderboard fetch — uses 1W timeframe.
- * Fallback if today's leaderboard is unavailable.
- *
- * @param {string} apiKey
- * @returns {Promise<Array>}
- * @private
- */
-async function _fetchGainersAlternate(apiKey) {
-  try {
-    const response = await axios.get(`${BIRDEYE_BASE}/trader/gainers-losers`, {
-      params: {
-        type:     '1W',
-        sort_by:  'PnL',
-        sort_type: 'desc',
-        offset:   0,
-        limit:    MAX_WALLETS,
-      },
-      headers: _headers(apiKey),
-      timeout: REQUEST_TIMEOUT,
-    });
-
-    const items = response.data?.data?.items || [];
-
-    return items.map((item) => ({
-      address: item.address || item.owner,
-      pnl7d:   item.pnl     || 0,
-      pnl30d:  0,
-    }));
-
-  } catch (err) {
-    logger.warn('[Birdeye] Alternate leaderboard also failed', {
-      error: err.message,
-    });
-    return [];
-  }
+  logger.warn('[Birdeye] All leaderboard timeframes failed');
+  return [];
 }
 
 /**

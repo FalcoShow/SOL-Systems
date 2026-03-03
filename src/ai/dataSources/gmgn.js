@@ -139,9 +139,16 @@ async function getTopTraders() {
  * @private
  */
 async function _fetchLeaderboard() {
+  // GMGN has no public API — these are internal endpoints scraped from
+  // their frontend. They change without notice. We try multiple known
+  // path patterns and multiple response-parsing strategies.
   const paths = [
-    { path: '/defi/quotation/v1/rank/sol/wallets/1d', params: { orderby: 'pnl', direction: 'desc', limit: MAX_WALLETS, offset: 0, period: '1d' } },
-    { path: '/defi/quotation/v1/rank/sol/wallets/7d', params: { orderby: 'pnl', direction: 'desc', limit: MAX_WALLETS, offset: 0 } },
+    { path: '/defi/quotation/v1/rank/sol/wallets/7d',  params: { orderby: 'pnl', direction: 'desc', limit: MAX_WALLETS, offset: 0 } },
+    { path: '/defi/quotation/v1/rank/sol/wallets/1d',  params: { orderby: 'pnl', direction: 'desc', limit: MAX_WALLETS, offset: 0, period: '1d' } },
+    { path: '/defi/quotation/v1/rank/sol/wallets/30d', params: { orderby: 'pnl', direction: 'desc', limit: MAX_WALLETS, offset: 0 } },
+    // Alternate path patterns GMGN may use
+    { path: '/api/v1/rank/sol/wallets/7d',             params: { orderby: 'pnl', direction: 'desc', limit: MAX_WALLETS } },
+    { path: '/defi/quotation/v1/smartmoney/sol/walletNew', params: { period: '7d', limit: MAX_WALLETS } },
   ];
 
   for (const base of GMGN_BASES) {
@@ -154,15 +161,39 @@ async function _fetchLeaderboard() {
             timeout: REQUEST_TIMEOUT,
           });
 
-          const items = response.data?.data?.rank || response.data?.rank || [];
-          const normalised = _normaliseLeaderboard(items);
+          // GMGN changes response shapes — try multiple data paths
+          const body = response.data;
+          const items =
+            body?.data?.rank    ||
+            body?.data?.wallets ||
+            body?.data?.items   ||
+            body?.data          ||   // Sometimes data IS the array
+            body?.rank          ||
+            body?.wallets       ||
+            [];
+
+          // Only try to normalise if we got an array
+          const list = Array.isArray(items) ? items : [];
+          const normalised = _normaliseLeaderboard(list);
+
           if (normalised.length > 0) {
-            logger.debug('[GMGN] Leaderboard fetched', { base, path, count: normalised.length });
+            logger.info('[GMGN] Leaderboard fetched', { base, path, count: normalised.length });
             return normalised;
+          }
+
+          // Log what we got to help debug when GMGN changes things
+          if (body?.data || body?.rank) {
+            logger.debug('[GMGN] Endpoint responded but parsed 0 wallets', {
+              path,
+              dataType:  typeof body?.data,
+              dataKeys:  body?.data ? Object.keys(body.data).slice(0, 5) : [],
+            });
           }
         } catch (err) {
           logger.debug('[GMGN] Leaderboard attempt failed', {
-            base, path, attempt, error: err.message,
+            base, path, attempt,
+            status: err.response?.status || 'network',
+            error:  err.message,
           });
           if (attempt < MAX_RETRIES) await _sleep(_randomDelay());
         }

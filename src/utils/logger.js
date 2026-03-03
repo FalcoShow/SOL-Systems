@@ -164,11 +164,11 @@ const logger = winston.createLogger({
 });
 
 // Raise maxListeners on DailyRotateFile transports to prevent
-// "MaxListenersExceededWarning" — Winston attaches many piped
-// stream listeners internally and 10 is not enough.
+// "MaxListenersExceededWarning" — Winston + the many modules in
+// this app attach piped stream listeners that exceed the default 10.
 for (const t of transports) {
   if (t instanceof DailyRotateFile && typeof t.setMaxListeners === 'function') {
-    t.setMaxListeners(20);
+    t.setMaxListeners(50);
   }
 }
 
