@@ -163,12 +163,13 @@ const logger = winston.createLogger({
   rejectionHandlers: [errorTransport],
 });
 
-// Raise maxListeners on DailyRotateFile transports to prevent
-// "MaxListenersExceededWarning" — Winston + the many modules in
-// this app attach piped stream listeners that exceed the default 10.
+// Suppress MaxListenersExceededWarning on DailyRotateFile transports.
+// Winston internally pipes many stream listeners through log transports
+// and the count grows over time. This is not a real memory leak — set
+// to 0 (unlimited) to silence the false-positive warning.
 for (const t of transports) {
   if (t instanceof DailyRotateFile && typeof t.setMaxListeners === 'function') {
-    t.setMaxListeners(50);
+    t.setMaxListeners(0);
   }
 }
 

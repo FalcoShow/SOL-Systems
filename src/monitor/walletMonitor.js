@@ -663,6 +663,12 @@ class WalletMonitor extends EventEmitter {
   async _healthCheck() {
     if (!this._wsConnected) return;
 
+    // Send a WebSocket ping frame to keep the connection alive.
+    // Helius (and most RPC providers) close idle connections after ~5 min.
+    if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+      try { this._ws.ping(); } catch (_) {}
+    }
+
     const trackedCount = this._trackedWallets.size;
     const subCount     = this._subscriptions.size;
 

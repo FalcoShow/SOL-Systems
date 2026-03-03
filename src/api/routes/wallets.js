@@ -34,7 +34,7 @@ function isValidSolanaAddress(address) {
 router.get('/', async (req, res) => {
   try {
     const wallets = await prisma.trackedWallet.findMany({
-      orderBy: { createdAt: 'desc' },
+      orderBy: { addedAt: 'desc' },
       include: {
         _count: {
           select: { walletTrades: true },
@@ -49,7 +49,7 @@ router.get('/', async (req, res) => {
       isActive:             w.isActive,
       estimatedCapitalSOL:  w.estimatedCapitalSOL,
       capitalOverrideSOL:   w.capitalOverrideSOL,
-      createdAt:            w.createdAt,
+      createdAt:            w.addedAt,
       lastSeenAt:           w.lastSeenAt,
       detectedTradeCount:   w._count.walletTrades,
     }));

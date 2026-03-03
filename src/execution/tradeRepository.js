@@ -749,6 +749,7 @@ async function logNotification(data) {
 async function connect() {
   try {
     await prisma.$connect();
+    startKeepalive();
     logger.info('Database connected ✓');
   } catch (err) {
     logger.error('Database connection failed', { error: err.message });
@@ -761,6 +762,7 @@ async function connect() {
  * Called during app shutdown.
  */
 async function disconnect() {
+  stopKeepalive();
   await prisma.$disconnect();
   logger.info('Database disconnected');
 }
@@ -776,6 +778,28 @@ async function healthCheck() {
   } catch {
     return false;
   }
+}
+
+// ── DB keepalive ───────────────────────────────────────────
+// Neon serverless Postgres suspends idle connections after ~5 min.
+// Ping every 3 min to keep the connection alive.
+let _keepaliveTimer = null;
+
+function startKeepalive() {
+  if (_keepaliveTimer) return;
+  _keepaliveTimer = setInterval(async () => {
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+    } catch (err) {
+      logger.debug('DB keepalive ping failed — will auto-reconnect', {
+        error: err.message,
+      });
+    }
+  }, 3 * 60 * 1000); // 3 minutes
+}
+
+function stopKeepalive() {
+  if (_keepaliveTimer) { clearInterval(_keepaliveTimer); _keepaliveTimer = null; }
 }
 
 // ────────────────────────────────────────────────────────────
