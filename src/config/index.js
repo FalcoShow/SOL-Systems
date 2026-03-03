@@ -135,6 +135,13 @@ try {
       webhookPath:   '/webhook/helius',
     },
 
+    jito: {
+      enabled:        optionalBool('USE_JITO_BUNDLES', true),
+      blockEngineUrl: optional('JITO_BLOCK_ENGINE_URL', 'https://mainnet.block-engine.jito.wtf'),
+      tipLamports:    optionalInt('JITO_TIP_LAMPORTS', 10000), // 0.00001 SOL default
+      maxTipLamports: optionalInt('JITO_MAX_TIP_LAMPORTS', 100000), // 0.0001 SOL cap
+    },
+
   };
 
   // ── Post-load validation ────────────────────────────────────

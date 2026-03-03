@@ -31,10 +31,11 @@ const logger             = require('../utils/logger');
 const { parseTransaction, validateSwapData } = require('../monitor/transactionParser');
 const positionTracker    = require('../monitor/positionTracker');
 const { scalePositionSize, calculateSOLPnL, verifyPercentageMatch } = require('../utils/calculator');
-const { executeFullSwap, getTokenAmountForSell } = require('./jupiterClient');
+const { executeFullSwap, getTokenAmountForSell, getQuote, SOL_MINT } = require('./jupiterClient');
 const riskManager        = require('./riskManager');
 const tradeRepository    = require('./tradeRepository');
-const { getSOLBalance, getSOLPrice, shortenAddress } = require('../utils/solana');
+const { getSOLBalance, getSOLPrice, shortenAddress, SOLToLamports, lamportsToSOL } = require('../utils/solana');
+const marketRegime       = require('../jobs/marketRegime');
 
 // ────────────────────────────────────────────────────────────
 //  EXECUTION QUEUE
@@ -233,11 +234,90 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
     }
   }
 
+  // ── Stale entry detection ────────────────────────────────
+  // If the token price has moved significantly since the tracked wallet
+  // bought, our entry is stale — we'd buy at a worse price and their
+  // profitable exit becomes our loss. Check the current price vs their
+  // entry price to decide whether to skip, reduce, or proceed.
+  const staleMaxDev = settings.staleEntryMaxDevPct ?? 20;
+  let staleMultiplier = 1.0; // 1.0 = full position, 0.5 = half, 0 = skip
+
+  if (swapData.pricePerTokenSOL && swapData.pricePerTokenSOL > 0) {
+    try {
+      // Get a quick Jupiter quote to check current price
+      // Buy 0.001 SOL worth to get the exchange rate without moving the market
+      const probeQuote = await getQuote({
+        inputMint:      SOL_MINT,
+        outputMint:     tokenMint,
+        amountLamports: SOLToLamports(0.001),
+        slippageBps:    500, // loose slippage for probe — we don't execute this
+      });
+
+      if (probeQuote && probeQuote.outAmount) {
+        const probeTokensOut = parseFloat(probeQuote.outAmount);
+        const probeSOLIn     = 0.001;
+        const currentPriceSOL = probeTokensOut > 0 ? probeSOLIn / probeTokensOut : 0;
+        const theirPriceSOL   = swapData.pricePerTokenSOL;
+
+        if (currentPriceSOL > 0 && theirPriceSOL > 0) {
+          const deviationPct = ((currentPriceSOL - theirPriceSOL) / theirPriceSOL) * 100;
+
+          if (deviationPct > staleMaxDev) {
+            // Token pumped too much — skip entirely
+            logger.warn('Skipping BUY — stale entry, token pumped too far', {
+              wallet: nickname, token: tokenSymbol,
+              theirPrice: theirPriceSOL.toFixed(12),
+              currentPrice: currentPriceSOL.toFixed(12),
+              deviation: deviationPct.toFixed(1) + '%',
+              maxDev: staleMaxDev + '%',
+            });
+            await _recordSkippedTrade(swapData, walletAddress, walletId,
+              `Stale entry — price up ${deviationPct.toFixed(1)}% since tracked wallet bought (max ${staleMaxDev}%)`);
+            return;
+          }
+
+          if (deviationPct > staleMaxDev / 2.5) {
+            // Moderate deviation — reduce position by 50%
+            staleMultiplier = 0.5;
+            logger.info('Late entry detected — reducing position 50%', {
+              wallet: nickname, token: tokenSymbol,
+              deviation: deviationPct.toFixed(1) + '%',
+            });
+          }
+
+          if (deviationPct < -15) {
+            // Token dumping after their buy — bad signal
+            logger.warn('Skipping BUY — token dumping after tracked wallet bought', {
+              wallet: nickname, token: tokenSymbol,
+              deviation: deviationPct.toFixed(1) + '%',
+            });
+            await _recordSkippedTrade(swapData, walletAddress, walletId,
+              `Token dumping ${deviationPct.toFixed(1)}% since tracked wallet bought — bad signal`);
+            return;
+          }
+        }
+      }
+    } catch (err) {
+      // Non-fatal — if we can't check, proceed with full position
+      logger.debug('Stale entry check failed — proceeding anyway', {
+        token: tokenSymbol, error: err.message,
+      });
+    }
+  }
+
   // ── Capital for position sizing ───────────────────────────
   // Use the AI-assigned budget for this wallet (allocationSOL) when set,
   // so we deploy exactly the slice the AI intended rather than full capital.
   // Falls back to full settings capital for manually-added wallets.
-  const myCapitalSOL = trackedWallet?.allocationSOL || settings.myCapitalSOL;
+  // In full compound mode, use live balance for maximum growth.
+  let myCapitalSOL = trackedWallet?.allocationSOL || settings.myCapitalSOL;
+
+  if (!trackedWallet?.allocationSOL && settings.compoundMode === 'full') {
+    const liveBalance = await getSOLBalance(config.wallet.publicKey).catch(() => null);
+    if (liveBalance && liveBalance > myCapitalSOL) {
+      myCapitalSOL = Math.max(liveBalance - (settings.minSolReserve || 0.1), myCapitalSOL);
+    }
+  }
 
   // ── Get tracked wallet's estimated capital ────────────────
   const trackedCapitalSOL = trackedWallet?.manualCapitalSOL
@@ -308,7 +388,29 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
     return;
   }
 
-  const finalPositionSOL = riskCheck.finalPositionSOL;
+  // Apply stale entry and market regime multipliers
+  const regimeMultiplier = marketRegime.getMultiplier();
+
+  if (regimeMultiplier <= 0) {
+    logger.warn('Skipping BUY — market regime is PANIC', {
+      wallet: nickname, token: tokenSymbol, regime: marketRegime.getRegime(),
+    });
+    await _recordSkippedTrade(swapData, walletAddress, walletId,
+      `Market regime: ${marketRegime.getRegime()} — no new buys`);
+    return;
+  }
+
+  const finalPositionSOL = riskCheck.finalPositionSOL * staleMultiplier * regimeMultiplier;
+
+  if (staleMultiplier < 1.0 || regimeMultiplier !== 1.0) {
+    logger.info('Position adjusted by multipliers', {
+      original: riskCheck.finalPositionSOL.toFixed(4),
+      final:    finalPositionSOL.toFixed(4),
+      stale:    staleMultiplier,
+      regime:   regimeMultiplier,
+      regimeName: marketRegime.getRegime(),
+    });
+  }
 
   // ── Record the wallet trade in DB ─────────────────────────
   const walletTradeRecord = await tradeRepository.recordWalletTrade({

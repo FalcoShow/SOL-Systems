@@ -32,7 +32,7 @@ const CIELO_BASE      = 'https://feed-api.cielo.finance/api/v1';
 const REQUEST_TIMEOUT = 20_000;
 const DELAY_BETWEEN   = 500;      // ms between sequential calls
 const MAX_WALLETS     = 20;
-const MIN_SWAP_USD    = 500;      // Only consider swaps ≥ $500
+const MIN_SWAP_USD    = 100;      // Only consider swaps ≥ $100 (cast wide net for discovery)
 
 // ────────────────────────────────────────────────────────────
 //  MAIN EXPORT
@@ -66,46 +66,58 @@ async function getTopTraders() {
     }
 
     logger.info('[Cielo] Unique wallets discovered from feed', {
-      count: walletAddresses.length,
+      count:   walletAddresses.length,
+      topAddr: walletAddresses[0]?.address?.slice(0, 8) + '...',
     });
 
-    // ── Step 2: Enrich each wallet with PnL stats ──────────
+    // ── Step 2: Build candidates from feed data + optional PnL enrichment ──
+    // Free Cielo plan only has /feed. PnL stats need Builder ($89/mo).
+    // We extract basic stats from feed swaps and try PnL as a bonus.
     const candidates = [];
 
-    for (const address of walletAddresses.slice(0, MAX_WALLETS)) {
+    for (const { address, feedStats } of walletAddresses.slice(0, MAX_WALLETS)) {
       try {
-        await _sleep(DELAY_BETWEEN);
-        const stats = await _fetchWalletStats(apiKey, address);
-
-        if (stats) {
-          candidates.push({
-            address,
-            source:          'cielo',
-            pnl7dUSD:        stats.pnl7d    || 0,
-            pnl30dUSD:       stats.pnl30d   || 0,
-            winRatePct:      stats.winRate   || 0,
-            totalTrades7d:   stats.trades7d  || 0,
-            totalTrades30d:  stats.trades30d || 0,
-            tradesPerDay:    stats.tradesPerDay || 0,
-            avgHoldTimeMs:   0,
-            estimatedCapSOL: stats.estCapSOL || 0,
-            topTokens:       stats.topTokens || [],
-            lastActiveAt:    stats.lastActiveAt || null,
-            smartMoneyLabel: null,
-            dataQuality:     stats.dataQuality || 50,
-          });
+        // Try PnL enrichment (works on Builder+ plans, fails gracefully on Free)
+        let pnlStats = null;
+        try {
+          await _sleep(DELAY_BETWEEN);
+          pnlStats = await _fetchWalletStats(apiKey, address);
+        } catch (_) {
+          // Expected on free plan — PnL endpoint not available
         }
+
+        // Merge feed-derived stats with PnL stats (PnL takes priority if available)
+        const trades7d  = pnlStats?.trades7d  || feedStats.tradeCount || 0;
+        const winRate   = pnlStats?.winRate   || 0;
+        const pnl7d     = pnlStats?.pnl7d    || feedStats.estimatedPnlUSD || 0;
+
+        candidates.push({
+          address,
+          source:          'cielo',
+          pnl7dUSD:        pnl7d,
+          pnl30dUSD:       pnlStats?.pnl30d   || 0,
+          winRatePct:      winRate,
+          totalTrades7d:   trades7d,
+          totalTrades30d:  pnlStats?.trades30d || 0,
+          tradesPerDay:    trades7d > 0 ? parseFloat((trades7d / 7).toFixed(1)) : feedStats.tradesPerDay || 0,
+          avgHoldTimeMs:   0,
+          estimatedCapSOL: pnlStats?.estCapSOL || feedStats.avgSwapUSD / 150 || 0,  // rough: avg swap / SOL price
+          topTokens:       pnlStats?.topTokens || feedStats.tokens || [],
+          lastActiveAt:    feedStats.lastSeen || null,
+          smartMoneyLabel: null,
+          dataQuality:     pnlStats ? (pnlStats.dataQuality || 60) : feedStats.quality,
+        });
       } catch (err) {
-        logger.debug('[Cielo] Failed to enrich wallet', {
+        logger.debug('[Cielo] Failed to process wallet', {
           address: address.slice(0, 8) + '...',
           error:   err.message,
         });
       }
     }
 
-    logger.info('[Cielo] Enrichment complete', {
+    logger.info('[Cielo] Processing complete', {
       discovered: walletAddresses.length,
-      enriched:   candidates.length,
+      candidates: candidates.length,
     });
 
     return candidates;
@@ -133,41 +145,110 @@ async function getTopTraders() {
  */
 async function _discoverWalletsFromFeed(apiKey) {
   try {
-    const response = await axios.get(`${CIELO_BASE}/feed`, {
-      params: {
-        chains:   'solana',
-        txTypes:  'swap',
-        minUSD:   MIN_SWAP_USD,
-        limit:    100,
-      },
-      headers: _headers(apiKey),
-      timeout: REQUEST_TIMEOUT,
-    });
+    // First try with swap filter, then fall back to all tx types
+    const paramSets = [
+      { chains: 'solana', txTypes: 'swap', minUSD: MIN_SWAP_USD, limit: 100 },
+      { chains: 'solana', minUSD: MIN_SWAP_USD, limit: 100 },
+    ];
 
-    const items = response.data?.data || response.data?.items || response.data || [];
+    let items = [];
+
+    for (const params of paramSets) {
+      const response = await axios.get(`${CIELO_BASE}/feed`, {
+        params,
+        headers: _headers(apiKey),
+        timeout: REQUEST_TIMEOUT,
+      });
+
+      // Cielo returns { status, data: { items: [...], paging: {...} }, message }
+      // response.data is the axios body, response.data.data is the API "data" field
+      const body = response.data;
+      items = body?.data?.items
+           || body?.items
+           || (Array.isArray(body?.data) ? body.data : [])
+           || [];
+
+      // Log actual response shape for debugging
+      logger.debug('[Cielo] Feed response shape', {
+        topKeys:     Object.keys(body || {}),
+        dataType:    typeof body?.data,
+        dataKeys:    body?.data ? Object.keys(body.data).slice(0, 8) : 'N/A',
+        itemCount:   Array.isArray(items) ? items.length : 'not-array',
+        firstItem:   Array.isArray(items) && items[0]
+          ? Object.keys(items[0]).slice(0, 10)
+          : 'N/A',
+        params:      Object.keys(params),
+      });
+
+      if (Array.isArray(items) && items.length > 0) break;
+
+      // Small delay before trying next param set
+      await _sleep(500);
+    }
 
     if (!Array.isArray(items) || items.length === 0) {
-      logger.debug('[Cielo] Feed returned empty results');
+      logger.debug('[Cielo] Feed returned empty results after all param sets');
       return [];
     }
 
-    // Extract unique wallet addresses, count occurrences for ranking
-    const walletCounts = new Map();
+    // Extract unique wallet addresses with stats from feed items
+    // Cielo feed items use "wallet" as the primary address field
+    const walletMap = new Map(); // addr → { count, totalUSD, tokens, lastSeen }
     for (const item of items) {
-      const addr = item.wallet || item.address || item.sender || item.from;
-      if (addr && typeof addr === 'string' && addr.length > 30) {
-        walletCounts.set(addr, (walletCounts.get(addr) || 0) + 1);
+      const addr = item.wallet || item.wallet_address || item.from || item.address || item.sender;
+      if (!addr || typeof addr !== 'string' || addr.length < 30) continue;
+
+      const usdValue = parseFloat(
+        item.amount_usd || item.token0_amount_usd || item.value_usd || item.usd_value || 0
+      );
+      const token = item.token0_symbol || item.token_symbol || item.symbol || null;
+      const timestamp = item.timestamp ? new Date(
+        typeof item.timestamp === 'number' && item.timestamp < 1e12
+          ? item.timestamp * 1000
+          : item.timestamp
+      ) : null;
+
+      if (!walletMap.has(addr)) {
+        walletMap.set(addr, {
+          count: 0, totalUSD: 0, tokens: new Set(), lastSeen: null,
+        });
+      }
+      const entry = walletMap.get(addr);
+      entry.count += 1;
+      entry.totalUSD += usdValue;
+      if (token) entry.tokens.add(token);
+      if (timestamp && (!entry.lastSeen || timestamp > entry.lastSeen)) {
+        entry.lastSeen = timestamp;
       }
     }
 
-    // Sort by frequency (most active first) and return top N
-    return [...walletCounts.entries()]
-      .sort((a, b) => b[1] - a[1])
+    logger.info('[Cielo] Wallets extracted from feed', {
+      totalItems:    items.length,
+      uniqueWallets: walletMap.size,
+    });
+
+    // Sort by frequency (most active first) and return top N with feed stats
+    return [...walletMap.entries()]
+      .sort((a, b) => b[1].count - a[1].count)
       .slice(0, MAX_WALLETS)
-      .map(([addr]) => addr);
+      .map(([addr, stats]) => ({
+        address: addr,
+        feedStats: {
+          tradeCount:      stats.count,
+          tradesPerDay:    parseFloat((stats.count / 7).toFixed(1)),
+          avgSwapUSD:      stats.count > 0 ? stats.totalUSD / stats.count : 0,
+          estimatedPnlUSD: 0,  // Can't determine PnL from feed alone
+          tokens:          [...stats.tokens].slice(0, 5),
+          lastSeen:        stats.lastSeen,
+          quality:         Math.min(100, 25 + (stats.count > 3 ? 15 : 0) + (stats.tokens.size > 1 ? 15 : 0) + (stats.totalUSD > 1000 ? 15 : 0)),
+        },
+      }));
 
   } catch (err) {
-    logger.warn('[Cielo] Feed discovery failed', { error: err.message });
+    logger.warn('[Cielo] Feed discovery failed', {
+      error:  err.message,
+      status: err.response?.status,
+    });
     return [];
   }
 }

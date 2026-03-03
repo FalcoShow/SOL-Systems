@@ -18,7 +18,8 @@ process.title = 'sol-systems';
 // ── Load all modules (any require-time error will be caught) ──
 let logger, tradeRepository, positionTracker, walletMonitor,
     heliusWebhook, tradeExecutor, apiServer, telegramBot,
-    dailyReportJob, priceSync, walletSync, cleanupJob;
+    dailyReportJob, priceSync, walletSync, cleanupJob,
+    positionGuardian, allocationManager, marketRegime, intradayRotation;
 
 try {
   console.log('[boot] Loading modules...');
@@ -34,6 +35,10 @@ try {
   priceSync       = require('./jobs/priceSync');
   walletSync      = require('./jobs/walletSync');
   cleanupJob      = require('./jobs/cleanup');
+  positionGuardian   = require('./jobs/positionGuardian');
+  allocationManager  = require('./jobs/allocationManager');
+  marketRegime       = require('./jobs/marketRegime');
+  intradayRotation   = require('./jobs/intradayRotation');
   console.log('[boot] All modules loaded OK');
 } catch (err) {
   console.error('[boot] FATAL — module load failed:', err.message);
@@ -51,16 +56,16 @@ async function main() {
   logger.info('  Starting up...');
   logger.info('═══════════════════════════════════════');
 
-  // [3/10] API server starts FIRST — so Railway healthcheck passes
+  // API server starts FIRST — so Railway healthcheck passes
   // immediately while the rest of the system boots in the background.
-  logger.info('[1/10] Starting API server...');
+  logger.info('[1/14] Starting API server...');
   await apiServer.start();
-  logger.info('[1/10] API server listening — healthcheck will now pass');
+  logger.info('[1/14] API server listening — healthcheck will now pass');
 
-  logger.info('[2/10] Connecting to database...');
+  logger.info('[2/14] Connecting to database...');
   await tradeRepository.connect();
 
-  logger.info('[3/10] Loading settings...');
+  logger.info('[3/14] Loading settings...');
   const settings = await tradeRepository.getSettings();
   logger.info('Settings loaded', {
     capital:        settings.myCapitalSOL + ' SOL',
@@ -74,15 +79,15 @@ async function main() {
     logger.warn('⚠️  Trading is currently PAUSED', { reason: settings.pauseReason });
   }
 
-  logger.info('[4/10] Starting Telegram bot...');
+  logger.info('[4/14] Starting Telegram bot...');
   await telegramBot.start();
 
-  logger.info('[5/10] Restoring open positions...');
+  logger.info('[5/14] Restoring open positions...');
   const openTrades = await tradeRepository.getOpenTrades();
   positionTracker.loadFromDatabase(openTrades);
   logger.info(`Restored ${openTrades.length} open position(s) from database`);
 
-  logger.info('[6/10] Loading tracked wallets...');
+  logger.info('[6/14] Loading tracked wallets...');
   const trackedWallets = await tradeRepository.getTrackedWallets(true);
   logger.info(`Found ${trackedWallets.length} active tracked wallet(s)`, {
     wallets: trackedWallets.map(w => w.nickname),
@@ -91,22 +96,34 @@ async function main() {
     logger.warn('No wallets configured yet. Add one via the Wallets page or /addwallet in Telegram.');
   }
 
-  logger.info('[7/10] Starting wallet monitor...');
+  logger.info('[7/14] Starting wallet monitor...');
   await walletMonitor.start(
     trackedWallets.map(w => ({ id: w.id, address: w.address, nickname: w.nickname }))
   );
 
-  logger.info('[8/10] Initializing Helius webhook handler...');
+  logger.info('[8/14] Initializing Helius webhook handler...');
   heliusWebhook.init(walletMonitor);
 
-  logger.info('[9/10] Starting trade executor...');
+  logger.info('[9/14] Starting trade executor...');
   tradeExecutor.init(walletMonitor, heliusWebhook, telegramBot);
 
-  logger.info('[10/10] Starting scheduled jobs...');
+  logger.info('[10/14] Starting scheduled jobs...');
   dailyReportJob.start(telegramBot.send);
   priceSync.start(apiServer.broadcast);
   walletSync.start();
   cleanupJob.start();
+
+  logger.info('[11/14] Starting position guardian...');
+  positionGuardian.start(telegramBot.send);
+
+  logger.info('[12/14] Starting market regime detector...');
+  marketRegime.start(telegramBot.send);
+
+  logger.info('[13/14] Starting allocation manager...');
+  allocationManager.start(telegramBot.send);
+
+  logger.info('[14/14] Starting intraday rotation...');
+  intradayRotation.start(telegramBot.send);
 
   logger.info('═══════════════════════════════════════');
   logger.info('  ✅ SOL SYSTEMS FULLY ONLINE');
@@ -128,6 +145,10 @@ async function main() {
 async function shutdown(signal) {
   console.log(`[shutdown] Signal: ${signal}`);
   try {
+    intradayRotation.stop();
+    allocationManager.stop();
+    marketRegime.stop();
+    positionGuardian.stop();
     priceSync.stop();
     walletSync.stop();
     cleanupJob.stop();

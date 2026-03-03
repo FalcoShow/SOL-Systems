@@ -176,6 +176,45 @@ async function runIntelligenceJob({ testOnly = false } = {}) {
 
     logger.info('[Intelligence] Capital snapshot', { capitalSOL });
 
+    // ── Compounding: Update capital in Settings ───────────
+    // Based on compoundMode, adjust the DB capital setting
+    // so position sizing scales with profits.
+    if (settingsVal && balanceVal && balanceVal > 0) {
+      const compoundMode   = settingsVal.compoundMode || 'full';
+      const originalCap    = settingsVal.myCapitalSOL || 10;
+      const liveBalance    = balanceVal;
+      let   newCapitalSOL  = originalCap;
+
+      if (compoundMode === 'full') {
+        // Deploy 100% of balance minus reserve
+        newCapitalSOL = Math.max(liveBalance - (settingsVal.minSolReserve || 0.1), originalCap);
+      } else if (compoundMode === 'partial') {
+        // Deploy original capital + 50% of profits
+        const profits = liveBalance - originalCap;
+        newCapitalSOL = profits > 0
+          ? originalCap + (profits * 0.5)
+          : originalCap;
+      }
+      // compoundMode === 'none' → keep originalCap unchanged
+
+      if (newCapitalSOL !== originalCap) {
+        try {
+          await tradeRepository.prisma.settings.update({
+            where: { id: 'global' },
+            data:  { myCapitalSOL: parseFloat(newCapitalSOL.toFixed(4)) },
+          });
+          logger.info('[Intelligence] Capital compounded', {
+            mode:     compoundMode,
+            original: originalCap.toFixed(4),
+            live:     liveBalance.toFixed(4),
+            new:      newCapitalSOL.toFixed(4),
+          });
+        } catch (err) {
+          logger.debug('[Intelligence] Capital update failed', { error: err.message });
+        }
+      }
+    }
+
     // ── Step 2: Fetch + score candidates ──────────────────
     await _updateRecord(recordId, { status: 'RUNNING' });
 
@@ -590,6 +629,7 @@ async function _saveReport(recordId, forDate, capitalSOL, report, dataQuality) {
     birdeyeDataQuality: dataQuality?.birdeye    || 0,
     gmgnDataQuality:    dataQuality?.gmgn       || 0,
     cieloDataQuality:   dataQuality?.cielo      || 0,
+    heliusDataQuality:  dataQuality?.helius     || 0,
   };
 
   try {

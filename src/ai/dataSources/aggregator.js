@@ -34,7 +34,10 @@
 const birdeye = require('./birdeye');
 const gmgn    = require('./gmgn');
 const cielo   = require('./cielo');
+const helius  = require('./helius');
 const logger  = require('../../utils/logger');
+
+const ENABLE_GMGN = process.env.ENABLE_GMGN === 'true'; // Disabled by default — no public API
 
 // ────────────────────────────────────────────────────────────
 //  CONSTANTS
@@ -79,11 +82,15 @@ async function getCandidates() {
   logger.info('[Aggregator] Starting multi-source wallet fetch...');
 
   // ── Step 1: Fetch from all sources in parallel ────────
-  const [birdeyeResults, gmgnResults, cieloResults] = await Promise.allSettled([
+  const sourcePromises = [
     birdeye.getTopTraders(),
-    gmgn.getTopTraders(),
+    ENABLE_GMGN ? gmgn.getTopTraders() : Promise.resolve([]),
     cielo.getTopTraders(),
-  ]);
+    helius.getTopTraders(),
+  ];
+
+  const [birdeyeResults, gmgnResults, cieloResults, heliusResults] =
+    await Promise.allSettled(sourcePromises);
 
   const birdeyeWallets = birdeyeResults.status === 'fulfilled'
     ? birdeyeResults.value : [];
@@ -91,23 +98,29 @@ async function getCandidates() {
     ? gmgnResults.value : [];
   const cieloWallets   = cieloResults.status === 'fulfilled'
     ? cieloResults.value : [];
+  const heliusWallets  = heliusResults.status === 'fulfilled'
+    ? heliusResults.value : [];
 
   // Track data source quality for the intelligence report
   const dataQuality = {
     birdeye: _sourceQuality(birdeyeWallets),
     gmgn:    _sourceQuality(gmgnWallets),
     cielo:   _sourceQuality(cieloWallets),
+    helius:  _sourceQuality(heliusWallets),
   };
 
   logger.info('[Aggregator] Sources fetched', {
     birdeye:  birdeyeWallets.length,
     gmgn:     gmgnWallets.length,
     cielo:    cieloWallets.length,
+    helius:   heliusWallets.length,
     quality:  dataQuality,
   });
 
   // ── Step 2: Merge and deduplicate ─────────────────────
-  const merged = _mergeAndDeduplicate([...birdeyeWallets, ...gmgnWallets, ...cieloWallets]);
+  const merged = _mergeAndDeduplicate([
+    ...birdeyeWallets, ...gmgnWallets, ...cieloWallets, ...heliusWallets,
+  ]);
 
   logger.info('[Aggregator] After deduplication', { count: merged.length });
 

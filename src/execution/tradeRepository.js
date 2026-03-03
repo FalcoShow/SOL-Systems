@@ -803,6 +803,48 @@ function stopKeepalive() {
 }
 
 // ────────────────────────────────────────────────────────────
+//  WALLET PERFORMANCE
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Get rolling 24h performance stats for a specific tracked wallet.
+ * Used by the allocation manager to adjust capital allocation.
+ *
+ * @param {string} walletId - TrackedWallet ID
+ * @returns {Promise<{wins: number, losses: number, winRate: number, pnlSOL: number, trades: number}>}
+ */
+async function getWalletPerformance24h(walletId) {
+  try {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const trades = await prisma.trade.findMany({
+      where: {
+        trackedWalletId: walletId,
+        status:          'CONFIRMED',
+        tradeType:       'SELL',
+        confirmedAt:     { gte: since },
+      },
+      select: { pnlSOL: true, isWin: true },
+    });
+
+    const wins   = trades.filter(t => t.isWin).length;
+    const losses = trades.filter(t => !t.isWin).length;
+    const total  = wins + losses;
+    const pnlSOL = trades.reduce((sum, t) => sum + (t.pnlSOL || 0), 0);
+
+    return {
+      wins,
+      losses,
+      winRate: total > 0 ? (wins / total) * 100 : 0,
+      pnlSOL,
+      trades:  total,
+    };
+  } catch (err) {
+    logger.error('Failed to get wallet 24h performance', { error: err.message });
+    return { wins: 0, losses: 0, winRate: 0, pnlSOL: 0, trades: 0 };
+  }
+}
+
+// ────────────────────────────────────────────────────────────
 //  INTERNAL HELPERS
 // ────────────────────────────────────────────────────────────
 
@@ -860,6 +902,9 @@ module.exports = {
   connect,
   disconnect,
   healthCheck,
+
+  // Wallet performance
+  getWalletPerformance24h,
 
   // Expose prisma for advanced queries in jobs
   prisma,

@@ -35,6 +35,8 @@ const {
 const { getWallet, getConnection, shortenAddress, SOLToLamports, lamportsToSOL } = require('../utils/solana');
 const config                 = require('../config');
 const logger                 = require('../utils/logger');
+const jitoClient             = require('./jitoClient');
+const feeEstimator           = require('./feeEstimator');
 
 // ────────────────────────────────────────────────────────────
 //  CONSTANTS
@@ -172,7 +174,10 @@ async function getQuote({
  * @returns {Promise<VersionedTransaction>}
  */
 async function buildSwapTransaction(quote, userPublicKey) {
-  logger.debug('Building swap transaction');
+  // Get dynamic priority fee instead of static value
+  const dynamicFee = await feeEstimator.getRecommendedFee();
+
+  logger.debug('Building swap transaction', { priorityFee: dynamicFee });
 
   const swapRequest = {
     quoteResponse:              quote,
@@ -180,7 +185,7 @@ async function buildSwapTransaction(quote, userPublicKey) {
     wrapAndUnwrapSol:           true,   // Auto-wrap/unwrap SOL↔WSOL
     useSharedAccounts:          true,   // Reduces tx size
     feeAccount:                 null,   // No referral fee
-    computeUnitPriceMicroLamports: PRIORITY_FEE_MICROLAMPORTS,
+    computeUnitPriceMicroLamports: dynamicFee,
     asLegacyTransaction:        false,  // Use versioned tx
     useTokenLedger:             false,
     destinationTokenAccount:    null,   // Use default ATA
@@ -510,13 +515,46 @@ async function executeFullSwap({
       const transaction = await buildSwapTransaction(quote, userPublicKey);
 
       // ── Step 3: Execute (sign + send) ───────────────────
-      const { signature, lastValidBlockHeight } =
-        await executeSwap(transaction, wallet);
+      // Try Jito bundle first for MEV protection, fallback to standard
+      let signature, lastValidBlockHeight, usedJito = false;
+
+      if (jitoClient.isEnabled()) {
+        // Sign the transaction first (Jito needs it pre-signed)
+        const { blockhash, lastValidBlockHeight: lvbh } =
+          await getConnection().getLatestBlockhash(config.solana.commitment);
+        transaction.message.recentBlockhash = blockhash;
+        transaction.sign([wallet]);
+        lastValidBlockHeight = lvbh;
+
+        const jitoResult = await jitoClient.sendBundle(transaction);
+        if (jitoResult.success) {
+          signature = jitoResult.signature;
+          usedJito  = true;
+          logger.info('Trade sent via Jito bundle', {
+            sig:      signature?.slice(0, 8) + '...',
+            bundleId: jitoResult.bundleId,
+          });
+        } else {
+          logger.debug('Jito bundle failed — falling back to standard send', {
+            error: jitoResult.error,
+          });
+        }
+      }
+
+      // Standard send (fallback or if Jito disabled)
+      if (!usedJito) {
+        const execResult = await executeSwap(transaction, wallet);
+        signature            = execResult.signature;
+        lastValidBlockHeight = execResult.lastValidBlockHeight;
+      }
 
       const submittedAt = new Date();
 
       // ── Step 4: Confirm ─────────────────────────────────
-      const confirmation = await confirmTransaction(signature, lastValidBlockHeight);
+      // If Jito bundle landed, confirmation is already done — just verify
+      const confirmation = usedJito
+        ? { confirmed: true, error: null, elapsedMs: 0 }
+        : await confirmTransaction(signature, lastValidBlockHeight);
 
       if (!confirmation.confirmed) {
         // Distinguish between expiry (retriable) and on-chain failure (not retriable)

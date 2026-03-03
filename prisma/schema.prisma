@@ -220,6 +220,17 @@ model Settings {
   maxSlippageBps        Int      @default(100)     // 1%
   maxPriceImpactPct     Float    @default(5.0)
 
+  // Capital protection — Position Guardian
+  stopLossPct             Float    @default(-30.0)   // Auto-sell if PnL drops below this %
+  takeProfitPct           Float    @default(100.0)   // Sell 50% at this % gain (2x)
+  trailingStopActivatePct Float    @default(30.0)    // Activate trailing stop above this %
+  trailingStopTrailPct    Float    @default(50.0)    // Trail at 50% of peak (e.g. peak 40% → sell at 20%)
+  maxHoldTimeHours        Float    @default(24.0)    // Force-sell any position older than this
+  staleEntryMaxDevPct     Float    @default(20.0)    // Skip buy if price deviated more than this % since tracked wallet bought
+
+  // Compounding
+  compoundMode            String   @default("full")  // "full", "partial", "none"
+
   // System state
   isTradingPaused       Boolean  @default(false)
   pauseReason           String?
@@ -313,6 +324,7 @@ model WalletIntelligence {
   birdeyeDataQuality  Int      @default(0)
   gmgnDataQuality     Int      @default(0)
   cieloDataQuality    Int      @default(0)
+  heliusDataQuality   Int      @default(0)
 
   @@index([forDate])
   @@index([status])

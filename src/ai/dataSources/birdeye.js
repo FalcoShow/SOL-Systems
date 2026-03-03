@@ -25,9 +25,10 @@
 
 'use strict';
 
-const axios  = require('axios');
-const config = require('../../config');
-const logger = require('../../utils/logger');
+const axios       = require('axios');
+const config      = require('../../config');
+const logger      = require('../../utils/logger');
+const rateLimiter = require('../../utils/birdeyeRateLimiter');
 
 // ────────────────────────────────────────────────────────────
 //  CONSTANTS
@@ -179,17 +180,19 @@ async function _fetchGainersLeaderboard(apiKey) {
 
   for (const type of timeframes) {
     try {
-      const response = await axios.get(`${BIRDEYE_BASE}/trader/gainers-losers`, {
-        params: {
-          type,
-          sort_by:   'PnL',
-          sort_type: 'desc',
-          offset:    0,
-          limit:     MAX_WALLETS,
-        },
-        headers: _headers(apiKey),
-        timeout: REQUEST_TIMEOUT,
-      });
+      const response = await rateLimiter.request(() =>
+        axios.get(`${BIRDEYE_BASE}/trader/gainers-losers`, {
+          params: {
+            type,
+            sort_by:   'PnL',
+            sort_type: 'desc',
+            offset:    0,
+            limit:     MAX_WALLETS,
+          },
+          headers: _headers(apiKey),
+          timeout: REQUEST_TIMEOUT,
+        })
+      );
 
       const items = response.data?.data?.items || [];
       if (items.length > 0) {
@@ -234,17 +237,19 @@ async function _fetchWalletStats(apiKey, address) {
     const now       = Math.floor(Date.now() / 1000);
     const sevenDaysAgo = now - (7 * 24 * 60 * 60);
 
-    const response = await axios.get(`${BIRDEYE_BASE}/trader/txs/seek-by-time`, {
-      params: {
-        address,
-        tx_type:   'swap',
-        time_from: sevenDaysAgo,
-        time_to:   now,
-        limit:     100,
-      },
-      headers: _headers(apiKey),
-      timeout: REQUEST_TIMEOUT,
-    });
+    const response = await rateLimiter.request(() =>
+      axios.get(`${BIRDEYE_BASE}/trader/txs/seek-by-time`, {
+        params: {
+          address,
+          tx_type:   'swap',
+          time_from: sevenDaysAgo,
+          time_to:   now,
+          limit:     100,
+        },
+        headers: _headers(apiKey),
+        timeout: REQUEST_TIMEOUT,
+      })
+    );
 
     const txs = response.data?.data?.items || [];
 

@@ -26,10 +26,11 @@
 
 'use strict';
 
-const axios   = require('axios');
-const config  = require('../config');
-const logger  = require('../utils/logger');
+const axios       = require('axios');
+const config      = require('../config');
+const logger      = require('../utils/logger');
 const { shortenAddress } = require('../utils/solana');
+const rateLimiter = require('../utils/birdeyeRateLimiter');
 
 // ────────────────────────────────────────────────────────────
 //  CONSTANTS
@@ -37,7 +38,7 @@ const { shortenAddress } = require('../utils/solana');
 
 // Minimum liquidity a token pool must have before we trade it
 // Below this = too easy to rug pull or manipulate price
-const MIN_LIQUIDITY_USD = 10000; // $10,000 minimum pool liquidity
+const MIN_LIQUIDITY_USD = 25000; // $25,000 minimum pool liquidity
 
 // Minimum token age in seconds before we trade it
 // Tokens under 60 seconds old are almost certainly pump-and-dumps
@@ -290,6 +291,35 @@ async function checkTokenSafety(tokenMint, tradeAmountSOL = 0, solPriceUSD = 0) 
         }
       }
 
+      // ── Freeze authority check ─────────────────────────
+      // If freeze authority exists, the token creator can freeze
+      // ANY holder's tokens at will — this is a definitive rug vector.
+      // Block the trade entirely.
+      if (info.freezeAuthority) {
+        result.safe        = false;
+        result.blockReason = `Token has active freeze authority — creator can freeze your tokens`;
+        logger.warn('Token blocked — freeze authority exists', {
+          mint:            shortenAddress(tokenMint),
+          freezeAuthority: shortenAddress(info.freezeAuthority),
+        });
+        return result;
+      }
+
+      // ── Mint authority check ────────────────────────────
+      // If mint authority is NOT revoked, the creator can mint
+      // unlimited new tokens and dump them — diluting all holders.
+      // Don't block but reduce confidence significantly.
+      if (info.mintAuthority) {
+        result.warnings.push(
+          `Mint authority NOT revoked — creator can mint unlimited tokens (rug risk)`
+        );
+        result.mintAuthorityActive = true;
+        logger.warn('Token has active mint authority', {
+          mint:          shortenAddress(tokenMint),
+          mintAuthority: shortenAddress(info.mintAuthority),
+        });
+      }
+
       // ── Top holder concentration check ────────────────
       // If top 10 holders own > 80% of supply, rug risk is high
       if (info.top10HolderPct !== undefined && info.top10HolderPct > 80) {
@@ -379,13 +409,15 @@ async function getTokenLiquidity(tokenMint) {
       ? { 'X-API-KEY': config.prices.birdeyeApiKey }
       : {};
 
-    const response = await axios.get(
-      `${BIRDEYE_BASE}/defi/token_overview`,
-      {
-        params:  { address: tokenMint },
-        headers: { ...headers, 'x-chain': 'solana' },
-        timeout: 5000,
-      }
+    const response = await rateLimiter.request(() =>
+      axios.get(
+        `${BIRDEYE_BASE}/defi/token_overview`,
+        {
+          params:  { address: tokenMint },
+          headers: { ...headers, 'x-chain': 'solana' },
+          timeout: 5000,
+        }
+      )
     );
 
     const data = response.data?.data;
@@ -419,13 +451,15 @@ async function getTokenInfo(tokenMint) {
       ? { 'X-API-KEY': config.prices.birdeyeApiKey }
       : {};
 
-    const response = await axios.get(
-      `${BIRDEYE_BASE}/defi/token_security`,
-      {
-        params:  { address: tokenMint },
-        headers: { ...headers, 'x-chain': 'solana' },
-        timeout: 5000,
-      }
+    const response = await rateLimiter.request(() =>
+      axios.get(
+        `${BIRDEYE_BASE}/defi/token_security`,
+        {
+          params:  { address: tokenMint },
+          headers: { ...headers, 'x-chain': 'solana' },
+          timeout: 5000,
+        }
+      )
     );
 
     const data = response.data?.data;

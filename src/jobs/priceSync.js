@@ -23,6 +23,7 @@ const axios           = require('axios');
 const config          = require('../config');
 const logger          = require('../utils/logger');
 const positionTracker = require('../monitor/positionTracker');
+const rateLimiter     = require('../utils/birdeyeRateLimiter');
 
 // ────────────────────────────────────────────────────────────
 //  CONSTANTS
@@ -269,16 +270,20 @@ async function _fetchBirdeyePrice(mint) {
   if (!apiKey) return null;
 
   const [tokenRes, solRes] = await Promise.all([
-    axios.get(BIRDEYE_PRICE_URL, {
-      params:  { address: mint },
-      headers: { 'X-API-KEY': apiKey },
-      timeout: REQUEST_TIMEOUT,
-    }),
-    axios.get(BIRDEYE_PRICE_URL, {
-      params:  { address: SOL_MINT },
-      headers: { 'X-API-KEY': apiKey },
-      timeout: REQUEST_TIMEOUT,
-    }),
+    rateLimiter.request(() =>
+      axios.get(BIRDEYE_PRICE_URL, {
+        params:  { address: mint },
+        headers: { 'X-API-KEY': apiKey },
+        timeout: REQUEST_TIMEOUT,
+      })
+    ),
+    rateLimiter.request(() =>
+      axios.get(BIRDEYE_PRICE_URL, {
+        params:  { address: SOL_MINT },
+        headers: { 'X-API-KEY': apiKey },
+        timeout: REQUEST_TIMEOUT,
+      })
+    ),
   ]);
 
   const tokenPriceUSD = tokenRes.data?.data?.value;
