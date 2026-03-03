@@ -151,7 +151,8 @@ bot.command('help', async (ctx) => {
     '',
     '🤖 *AI Intelligence*',
     '/intelligence — View last AI wallet report',
-    '/testintelligence — Run AI pipeline now',
+    '/testintelligence — Run AI pipeline (dry run)',
+    '/golive — Run AI pipeline + activate wallets',
     '',
     '💡 *Examples*',
     '/addwallet CyaE1V...ga54o Cented',
@@ -364,6 +365,41 @@ bot.command('testintelligence', async (ctx) => {
     logger.error('testintelligence command failed', { error: err.message });
     await send('RAW', {
       message: `⚠️ *Intelligence test failed*\n\nError: ${err.message}`,
+    });
+  });
+});
+
+// ────────────────────────────────────────────────────────────
+//  /golive — Full intelligence pipeline + LIVE wallet swap
+// ────────────────────────────────────────────────────────────
+
+bot.command('golive', async (ctx) => {
+  await ctx.replyWithMarkdown(
+    '🚀 *GOING LIVE — Running full intelligence pipeline...*\n\n' +
+    '_This will discover wallets, score them, and ACTIVATE them for copy trading._\n' +
+    '_Running now — full report coming in 30-90 seconds..._'
+  );
+
+  // Run in LIVE mode — testOnly=false triggers the actual wallet swap
+  walletIntelligence.runNow({ testOnly: false }).then(async (report) => {
+    if (!report) {
+      await send('RAW', { message: '⚠️ *Intelligence job returned no report.* Check server logs.' });
+    } else {
+      await send('RAW', {
+        message:
+          `🚀 *LIVE pipeline complete!*\n\n` +
+          `Wallets selected: ${report.wallets?.length || 0}\n` +
+          `Confidence: ${report.confidence}/100\n\n` +
+          `_Wallet swap scheduled for 00:01 UTC. New wallets will start tracking automatically._`,
+      });
+      if (report.telegramSummary) {
+        await send('RAW', { message: report.telegramSummary });
+      }
+    }
+  }).catch(async (err) => {
+    logger.error('golive command failed', { error: err.message });
+    await send('RAW', {
+      message: `⚠️ *Go-live failed*\n\nError: ${err.message}`,
     });
   });
 });

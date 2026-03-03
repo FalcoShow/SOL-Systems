@@ -473,11 +473,11 @@ function _calculateStats(txs, walletAddr) {
     ? Math.max(...solAmounts) * 10
     : 0;
 
-  // Trades per day (7-day window estimate)
-  const timeSpanDays = sorted.length >= 2
-    ? Math.max(1, (sorted[sorted.length - 1].timestamp - sorted[0].timestamp) / 86400)
-    : 7;
-  const tradesPerDay = sorted.length / timeSpanDays;
+  // Trades in last 7 days (filter to actual 7d window)
+  const now7dAgo     = Math.floor(Date.now() / 1000) - (7 * 86400);
+  const trades7dOnly = sorted.filter(tx => tx.timestamp >= now7dAgo);
+  const trades7dCount = trades7dOnly.length;
+  const tradesPerDay  = parseFloat((trades7dCount / 7).toFixed(1));
 
   // Estimate 7d PnL from matched trades
   let pnl7dUSD = 0;
@@ -524,8 +524,8 @@ function _calculateStats(txs, walletAddr) {
 
   return {
     winRatePct:   parseFloat(winRatePct.toFixed(2)),
-    trades7d:     sorted.length,
-    tradesPerDay: parseFloat(tradesPerDay.toFixed(1)),
+    trades7d:     trades7dCount,
+    tradesPerDay,
     avgHoldMs:    Math.round(avgHoldMs),
     estCapSOL:    parseFloat(estCapSOL.toFixed(2)),
     pnl7dUSD:     parseFloat(pnl7dUSD.toFixed(2)),

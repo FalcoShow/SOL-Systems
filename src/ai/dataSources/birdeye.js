@@ -72,45 +72,58 @@ async function getTopTraders() {
     logger.info('[Birdeye] Leaderboard fetched', { count: gainers.length });
 
     // ── Step 2: Enrich each wallet with detailed stats ────
+    // Enrichment requires Starter+ plan — if it fails, we still
+    // include the wallet with leaderboard-only data (lower quality).
     const enriched = [];
 
     for (const gainer of gainers.slice(0, MAX_WALLETS)) {
       try {
         await _sleep(DELAY_BETWEEN);
-        const stats = await _fetchWalletStats(apiKey, gainer.address);
-
-        if (stats) {
-          enriched.push({
-            address:          gainer.address,
-            source:           'birdeye',
-            // From leaderboard
-            pnl7dUSD:         gainer.pnl7d     || 0,
-            pnl30dUSD:        gainer.pnl30d    || 0,
-            // From detailed stats
-            winRatePct:       stats.winRatePct  || 0,
-            totalTrades7d:    stats.trades7d    || 0,
-            totalTrades30d:   stats.trades30d   || 0,
-            avgHoldTimeMs:    stats.avgHoldMs   || 0,
-            tradesPerDay:     stats.tradesPerDay || 0,
-            estimatedCapSOL:  stats.estCapSOL   || 0,
-            topTokens:        stats.topTokens   || [],
-            lastActiveAt:     stats.lastActiveAt || null,
-            dataQuality:      stats.dataQuality  || 50,
+        let stats = null;
+        try {
+          stats = await _fetchWalletStats(apiKey, gainer.address);
+        } catch (enrichErr) {
+          logger.info('[Birdeye] Enrichment failed — using leaderboard-only data', {
+            address: gainer.address?.slice(0, 8) + '...',
+            error:   enrichErr.message,
+            status:  enrichErr.response?.status,
           });
         }
 
+        // Always include the wallet — use enrichment data if available,
+        // fall back to leaderboard-only data with lower quality score
+        enriched.push({
+          address:          gainer.address,
+          source:           'birdeye',
+          // From leaderboard (always available)
+          pnl7dUSD:         gainer.pnl7d     || 0,
+          pnl30dUSD:        gainer.pnl30d    || 0,
+          // From detailed stats (may be null if enrichment failed)
+          winRatePct:       stats?.winRatePct  || 0,
+          totalTrades7d:    stats?.trades7d    || 0,
+          totalTrades30d:   stats?.trades30d   || 0,
+          avgHoldTimeMs:    stats?.avgHoldMs   || 0,
+          tradesPerDay:     stats?.tradesPerDay || 0,
+          estimatedCapSOL:  stats?.estCapSOL   || 0,
+          topTokens:        stats?.topTokens   || [],
+          lastActiveAt:     stats?.lastActiveAt || null,
+          dataQuality:      stats?.dataQuality  || 30,  // Lower quality for leaderboard-only
+        });
+
       } catch (err) {
         // Non-fatal — skip this wallet, log and continue
-        logger.debug('[Birdeye] Failed to enrich wallet', {
+        logger.info('[Birdeye] Failed to process wallet', {
           address: gainer.address?.slice(0, 8) + '...',
           error:   err.message,
         });
       }
     }
 
-    logger.info('[Birdeye] Wallet enrichment complete', {
-      fetched:  gainers.length,
-      enriched: enriched.length,
+    logger.info('[Birdeye] Wallet processing complete', {
+      fetched:    gainers.length,
+      enriched:   enriched.filter(w => w.dataQuality > 30).length,
+      leaderOnly: enriched.filter(w => w.dataQuality <= 30).length,
+      total:      enriched.length,
     });
 
     return enriched;
@@ -268,9 +281,10 @@ async function _fetchWalletStats(apiKey, address) {
     return _calculateStatsFromTxs(txs);
 
   } catch (err) {
-    logger.debug('[Birdeye] _fetchWalletStats failed', {
+    logger.info('[Birdeye] _fetchWalletStats failed', {
       address: address?.slice(0, 8) + '...',
       error:   err.message,
+      status:  err.response?.status,
     });
     return null;
   }
