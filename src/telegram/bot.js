@@ -339,7 +339,7 @@ bot.command('intelligence', async (ctx) => {
 bot.command('testintelligence', async (ctx) => {
   await ctx.replyWithMarkdown(
     '🤖 *Running AI wallet intelligence pipeline...*\n\n' +
-    '_Fetching from Birdeye + GMGN, scoring candidates, calling Claude AI..._\n' +
+    '_Fetching from Helius + Birdeye + Cielo, scoring candidates..._\n' +
     '_This takes 30-90 seconds. You\'ll receive the full report when done._'
   );
 

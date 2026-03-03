@@ -95,10 +95,19 @@ async function runScoring({ candidates, capitalSOL, forDate, dataQuality }) {
 
     // ── Call Claude API ───────────────────────────────────
     logger.info('[WalletScorer] Calling Claude API...');
-    const rawResponse = await _callClaude(prompt);
+    let rawResponse;
+    try {
+      rawResponse = await _callClaude(prompt);
+    } catch (apiErr) {
+      // AI API unavailable — use rule-based fallback instead of failing the pipeline
+      logger.warn('[WalletScorer] Claude API unavailable — using rule-based fallback', {
+        error: apiErr.message,
+      });
+      return _fallbackReport(candidates, capitalSOL, forDate, dataQuality);
+    }
 
     // ── Parse the JSON response ───────────────────────────
-    const report = _parseResponse(rawResponse, candidates, capitalSOL, forDate);
+    const report = _parseResponse(rawResponse, candidates, capitalSOL, forDate, dataQuality);
 
     // ── Build formatted outputs ───────────────────────────
     report.telegramSummary = _buildTelegramSummary(report, forDate, capitalSOL);
@@ -113,8 +122,14 @@ async function runScoring({ candidates, capitalSOL, forDate, dataQuality }) {
     return report;
 
   } catch (err) {
-    logger.error('[WalletScorer] AI scoring failed', { error: err.message });
-    throw err;
+    logger.error('[WalletScorer] Scoring pipeline failed', { error: err.message });
+    // Even if something unexpected blows up, try the fallback before giving up
+    try {
+      return _fallbackReport(candidates, capitalSOL, forDate, dataQuality);
+    } catch (fbErr) {
+      logger.error('[WalletScorer] Fallback also failed', { error: fbErr.message });
+      throw err;
+    }
   }
 }
 
@@ -302,7 +317,7 @@ async function _callClaude(prompt) {
  * @returns {AIReport}
  * @private
  */
-function _parseResponse(rawText, candidates, capitalSOL, forDate) {
+function _parseResponse(rawText, candidates, capitalSOL, forDate, dataQuality) {
   // Strip markdown fences if Claude added them despite instructions
   let jsonStr = rawText.trim();
   jsonStr = jsonStr.replace(/^```json\s*/i, '').replace(/^```\s*/i, '');
@@ -318,7 +333,7 @@ function _parseResponse(rawText, candidates, capitalSOL, forDate) {
       error:   err.message,
     });
     // Return best-effort fallback using top candidates by score
-    return _fallbackReport(candidates, capitalSOL, forDate);
+    return _fallbackReport(candidates, capitalSOL, forDate, dataQuality);
   }
 
   // Validate and normalise the parsed response
@@ -530,52 +545,141 @@ function _buildHtmlReport(report, forDate, capitalSOL, dataQuality) {
 // ────────────────────────────────────────────────────────────
 
 /**
- * Fallback report when AI call fails.
- * Uses top 3 candidates by score with equal allocation.
+ * Rule-based fallback when the AI API is unavailable.
+ *
+ * Uses a weighted scoring formula on the aggregator's pre-scored
+ * candidates to select 3-5 wallets with score-proportional allocation
+ * and data-driven time windows / trading style classification.
+ *
+ * This is robust enough to run the bot profitably even without AI —
+ * the aggregator already scores on win rate, PnL, trade frequency,
+ * data quality, and token diversity.
  *
  * @param {Array}  candidates
  * @param {number} capitalSOL
  * @param {string} forDate
+ * @param {object} [dataQuality]
  * @returns {AIReport}
  * @private
  */
-function _fallbackReport(candidates, capitalSOL, forDate) {
-  logger.warn('[WalletScorer] Using fallback report (top 3 by score)');
+function _fallbackReport(candidates, capitalSOL, forDate, dataQuality = {}) {
+  logger.info('[WalletScorer] Using rule-based fallback scorer');
 
   const deployable  = capitalSOL * (1 - RESERVE_PCT);
-  const top3        = candidates.slice(0, 3);
-  const allocPct    = Math.floor(100 / top3.length);
+  const reserveSOL  = capitalSOL * RESERVE_PCT;
 
-  const wallets = top3.map((c) => ({
-    address:       c.address,
-    nickname:      _autoNickname(c.address),
-    score:         c.score,
-    allocationPct: allocPct,
-    allocationSOL: parseFloat(((allocPct / 100) * deployable).toFixed(4)),
-    trackFrom:     '13:00 UTC',
-    trackUntil:    '21:00 UTC',
-    tradingStyle:  'Unknown',
-    winRatePct:    c.winRatePct || 0,
-    pnl30dUSD:     c.pnl30dUSD || 0,
-    riskNotes:     ['AI analysis unavailable — using score-based fallback'],
-    reasoning:     'Selected as top scorer by aggregator scoring rubric.',
-  }));
+  // Select 3-5 wallets: take more if we have high-quality candidates
+  const minSelect = Math.min(MIN_WALLETS, candidates.length);
+  const maxSelect = Math.min(MAX_WALLETS, candidates.length);
+  // Use 3 if < 8 candidates, 4 if 8-12, 5 if 13+
+  const selectCount = candidates.length >= 13 ? maxSelect
+    : candidates.length >= 8 ? 4
+    : minSelect;
 
-  const reserveSOL   = capitalSOL * RESERVE_PCT;
-  const totalAlloc   = wallets.reduce((s, w) => s + w.allocationSOL, 0);
-  const report       = {
+  const topN = candidates.slice(0, selectCount);
+
+  if (topN.length === 0) {
+    return _emptyReport(forDate, capitalSOL);
+  }
+
+  // ── Score-weighted allocation ───────────────────────────
+  // Allocate proportional to aggregator score, but clamp to [10%, 40%]
+  const totalScore = topN.reduce((s, c) => s + (c.score || 1), 0);
+  let rawAllocPcts = topN.map((c) => ((c.score || 1) / totalScore) * 100);
+
+  // Clamp to [MIN_SINGLE_ALLOC, MAX_SINGLE_ALLOC] as percentages
+  const minPct = MIN_SINGLE_ALLOC * 100;  // 10%
+  const maxPct = MAX_SINGLE_ALLOC * 100;  // 40%
+  rawAllocPcts = rawAllocPcts.map((p) => Math.max(minPct, Math.min(maxPct, p)));
+
+  // Normalise so they sum to 100%
+  const allocSum = rawAllocPcts.reduce((s, p) => s + p, 0);
+  const allocPcts = rawAllocPcts.map((p) => parseFloat(((p / allocSum) * 100).toFixed(1)));
+
+  // ── Build wallet entries ────────────────────────────────
+  const wallets = topN.map((c, i) => {
+    const allocPct    = allocPcts[i];
+    const allocSOL    = parseFloat(((allocPct / 100) * deployable).toFixed(4));
+    const tradesDay   = c.tradesPerDay || 0;
+    const avgHoldMin  = (c.avgHoldTimeMs || 0) / 60000;
+
+    // Classify trading style from data
+    let tradingStyle = 'Unknown';
+    if (tradesDay >= 15 && avgHoldMin < 30) tradingStyle = 'Scalper';
+    else if (tradesDay >= 5)                tradingStyle = 'Day Trader';
+    else if (avgHoldMin > 60)               tradingStyle = 'Swing';
+    else if (tradesDay > 0)                 tradingStyle = 'Moderate';
+
+    // Assign time window based on style
+    let trackFrom  = '12:00 UTC';
+    let trackUntil = '20:00 UTC';
+    if (tradingStyle === 'Scalper')      { trackFrom = '13:00 UTC'; trackUntil = '21:00 UTC'; }
+    else if (tradingStyle === 'Swing')   { trackFrom = '08:00 UTC'; trackUntil = '20:00 UTC'; }
+    else if (tradingStyle === 'Day Trader') { trackFrom = '10:00 UTC'; trackUntil = '22:00 UTC'; }
+
+    // Risk notes based on data
+    const riskNotes = ['Rule-based selection (AI API unavailable)'];
+    if ((c.winRatePct || 0) < 40) riskNotes.push('Below-average win rate — monitor closely');
+    if (tradesDay > 25)           riskNotes.push('Very high trade frequency — potential slippage risk');
+    if ((c.dataQuality || c.avgDataQuality || 0) < 40) riskNotes.push('Limited data — lower confidence');
+    if ((c.sourceCount || 1) === 1) riskNotes.push('Single data source — cross-validation not possible');
+
+    // Reasoning
+    const reasoning = `Ranked #${i + 1} by aggregator with score ${c.score}/100. ` +
+      `Win rate: ${(c.winRatePct || 0).toFixed(1)}%, ` +
+      `${(c.totalTrades7d || 0)} trades in 7d, ` +
+      `${(c.sourceCount || 1)} data source(s).`;
+
+    return {
+      address:       c.address,
+      nickname:      _autoNickname(c.address),
+      score:         c.score || 0,
+      allocationPct: allocPct,
+      allocationSOL: allocSOL,
+      trackFrom,
+      trackUntil,
+      tradingStyle,
+      winRatePct:    c.winRatePct  || 0,
+      pnl30dUSD:     c.pnl30dUSD  || 0,
+      riskNotes,
+      reasoning,
+    };
+  });
+
+  const totalAlloc = wallets.reduce((s, w) => s + w.allocationSOL, 0);
+
+  // Confidence: based on data quality and candidate count
+  const avgScore   = topN.reduce((s, c) => s + (c.score || 0), 0) / topN.length;
+  const confidence = Math.min(75, Math.round(
+    (avgScore / 100) * 40 +              // Up to 40 pts for high scores
+    (topN.length >= 4 ? 15 : 5) +        // 15 pts for 4+ wallets
+    (candidates.length >= 10 ? 15 : 5) + // 15 pts for deep candidate pool
+    5                                      // Base 5 pts
+  ));
+
+  const report = {
     forDate,
     wallets,
-    summary:        'AI analysis failed. Using top-scored candidates as fallback.',
-    confidence:     40,
-    strategyType:   'fallback',
+    summary: `Rule-based selection: ${wallets.length} wallets chosen from ${candidates.length} candidates. ` +
+             `Top scorer at ${topN[0]?.score || 0}/100. ` +
+             `AI API unavailable — using aggregator scores for allocation. ` +
+             `System will use AI scoring when API access is restored.`,
+    confidence,
+    strategyType:   'rule-based',
     totalAllocated: parseFloat(totalAlloc.toFixed(4)),
     reservedSOL:    parseFloat(reserveSOL.toFixed(4)),
     capitalSOL,
   };
 
   report.telegramSummary = _buildTelegramSummary(report, forDate, capitalSOL);
-  report.htmlReport      = _buildHtmlReport(report, forDate, capitalSOL, {});
+  report.htmlReport      = _buildHtmlReport(report, forDate, capitalSOL, dataQuality);
+
+  logger.info('[WalletScorer] Rule-based fallback complete', {
+    wallets:    wallets.length,
+    confidence: report.confidence,
+    topScore:   topN[0]?.score || 0,
+  });
+
   return report;
 }
 
