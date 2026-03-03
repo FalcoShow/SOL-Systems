@@ -100,16 +100,28 @@ try {
       dailyLossLimitSOL: optionalFloat('DAILY_LOSS_LIMIT_SOL', 2.0),
     },
 
+    anthropic: {
+      apiKey: required('ANTHROPIC_API_KEY'),
+    },
+
     prices: {
       birdeyeApiKey:  optional('BIRDEYE_API_KEY', null),
       birdeyeBaseUrl: 'https://public-api.birdeye.so',
     },
 
+    cielo: {
+      apiKey: optional('CIELO_API_KEY', null),
+    },
+
     api: {
       // Accept either key name — whichever is set in Railway
+      // In production, at least one key MUST be set (no fallback)
       secretKey:    optional('API_SECRET_KEY', null) ||
                     optional('API_KEY',         null) ||
-                    optional('DASHBOARD_API_KEY', 'dev-secret'),
+                    optional('DASHBOARD_API_KEY', null) ||
+                    (optional('NODE_ENV', 'development') === 'production'
+                      ? (() => { throw new Error('API_SECRET_KEY is required in production'); })()
+                      : 'dev-local-only'),
       dashboardUrl: optional('DASHBOARD_URL', 'http://localhost:5173'),
     },
 

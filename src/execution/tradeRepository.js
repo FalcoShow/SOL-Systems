@@ -272,6 +272,41 @@ async function updateWalletPnL(walletId, pnlSOL, isWin) {
   }
 }
 
+/**
+ * Count the most recent consecutive losing SELL trades for a wallet.
+ * Used for intraday wallet eviction — if a wallet hits N losses in a row
+ * we deactivate it to prevent further drawdown.
+ *
+ * @param {string} walletId - TrackedWallet ID
+ * @returns {Promise<number>} Consecutive losses (0 if last trade was a win)
+ */
+async function getConsecutiveLosses(walletId) {
+  try {
+    // Get the most recent SELL trades for this wallet, newest first
+    const recentSells = await prisma.trade.findMany({
+      where: {
+        trackedWalletId: walletId,
+        tradeType:       'SELL',
+        status:          'CONFIRMED',
+        isWin:           { not: null },
+      },
+      orderBy: { confirmedAt: 'desc' },
+      take:    10,
+      select:  { isWin: true },
+    });
+
+    let streak = 0;
+    for (const trade of recentSells) {
+      if (trade.isWin === false) streak++;
+      else break;  // First win breaks the streak
+    }
+    return streak;
+  } catch (err) {
+    logger.error('Failed to get consecutive losses', { walletId, error: err.message });
+    return 0;
+  }
+}
+
 // ────────────────────────────────────────────────────────────
 //  WALLET TRADES (what THEY did)
 // ────────────────────────────────────────────────────────────
@@ -775,6 +810,7 @@ module.exports = {
   deactivateTrackedWallet,
   incrementWalletTradeCount,
   updateWalletPnL,
+  getConsecutiveLosses,
 
   // Trade writes
   recordWalletTrade,
@@ -803,4 +839,5 @@ module.exports = {
 
   // Expose prisma for advanced queries in jobs
   prisma,
+  rawPrisma: prisma,  // Alias used by walletSync, dailyPnLJob, cleanup
 };

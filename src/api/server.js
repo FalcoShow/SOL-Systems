@@ -21,11 +21,12 @@ const heliusWebhook   = require('../monitor/heliusWebhook');
 const tradeExecutor   = require('../execution/tradeExecutor');
 const { getSOLBalance, getSOLPrice } = require('../utils/solana');
 
-const { authMiddleware } = require('./middleware/auth');
-const walletsRouter      = require('./routes/wallets');
-const tradesRouter       = require('./routes/trades');
-const settingsRouter     = require('./routes/settings');
-const analyticsRouter    = require('./routes/analytics');
+const { authMiddleware }  = require('./middleware/auth');
+const walletsRouter       = require('./routes/wallets');
+const tradesRouter        = require('./routes/trades');
+const settingsRouter      = require('./routes/settings');
+const analyticsRouter     = require('./routes/analytics');
+const walletIntelligence  = require('../jobs/walletIntelligence');
 
 const app = express();
 
@@ -197,6 +198,104 @@ app.get('/api/pnl/summary', async (req, res) => {
       tradeRepository.getAggregateStats(null, null),
     ]);
     return res.json({ '24h':s24h, '7d':s7d, '30d':s30d, allTime:sAll });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── INTELLIGENCE ROUTES ──────────────────────────────────────
+// HTML report viewer — public, served directly in browser
+// GET /intelligence          → latest report HTML
+// GET /intelligence/:date    → specific date HTML (e.g. /intelligence/2026-03-03)
+
+app.get('/intelligence', async (req, res) => {
+  try {
+    const last = walletIntelligence.getLastReport();
+    if (last?.report?.htmlReport) {
+      return res.type('html').send(last.report.htmlReport);
+    }
+    // Fall back to most recent DB record
+    const record = await tradeRepository.prisma.walletIntelligence.findFirst({
+      orderBy: { forDate: 'desc' },
+    });
+    if (record?.htmlReport) {
+      return res.type('html').send(record.htmlReport);
+    }
+    return res.status(404).type('html').send(
+      '<html><body style="background:#0a0a0f;color:#e2e8f0;font-family:sans-serif;padding:40px">' +
+      '<h2>No intelligence report available yet.</h2>' +
+      '<p>The nightly AI job runs at 11:50 PM UTC. Use <code>/testintelligence</code> in Telegram to generate one now.</p>' +
+      '</body></html>'
+    );
+  } catch (err) {
+    logger.error('GET /intelligence error', { error: err.message });
+    return res.status(500).send('Internal server error');
+  }
+});
+
+app.get('/intelligence/:date', async (req, res) => {
+  try {
+    const { date } = req.params;
+    // Validate date format YYYY-MM-DD
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).type('html').send('<html><body>Invalid date format. Use YYYY-MM-DD.</body></html>');
+    }
+    const record = await tradeRepository.prisma.walletIntelligence.findUnique({
+      where: { forDate: date },
+    });
+    if (!record?.htmlReport) {
+      return res.status(404).type('html').send(
+        `<html><body style="background:#0a0a0f;color:#e2e8f0;font-family:sans-serif;padding:40px">` +
+        `<h2>No intelligence report found for ${date}.</h2></body></html>`
+      );
+    }
+    return res.type('html').send(record.htmlReport);
+  } catch (err) {
+    logger.error('GET /intelligence/:date error', { error: err.message });
+    return res.status(500).send('Internal server error');
+  }
+});
+
+// JSON API endpoints for intelligence data (auth required via /api gate)
+app.get('/api/intelligence', async (req, res) => {
+  try {
+    const records = await tradeRepository.prisma.walletIntelligence.findMany({
+      orderBy: { forDate: 'desc' },
+      take: 30,
+      select: {
+        id: true, forDate: true, generatedAt: true, status: true,
+        capitalSOL: true, walletsRecommended: true, walletsAdded: true,
+        walletsRemoved: true, confidence: true,
+        birdeyeDataQuality: true, gmgnDataQuality: true,
+        reportJson: true,
+      },
+    });
+    return res.json({ reports: records });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/intelligence/latest', async (req, res) => {
+  try {
+    const last = walletIntelligence.getLastReport();
+    if (last) return res.json(last);
+    const record = await tradeRepository.prisma.walletIntelligence.findFirst({
+      orderBy: { forDate: 'desc' },
+    });
+    return record ? res.json(record) : res.status(404).json({ error: 'No report available' });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/intelligence/run', async (req, res) => {
+  try {
+    res.json({ success: true, message: 'Intelligence pipeline started. Check Telegram for results.' });
+    // Run after responding so HTTP doesn't time out
+    walletIntelligence.runNow().catch((err) => {
+      logger.error('Manual intelligence run failed', { error: err.message });
+    });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }

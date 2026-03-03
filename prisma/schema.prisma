@@ -47,6 +47,20 @@ model TrackedWallet {
   totalLosses         Int      @default(0)
   totalPnLSOL         Float    @default(0)
 
+  // AI Intelligence tracking
+  addedByAI           Boolean  @default(false)
+  aiAddedAt           DateTime?
+  aiRemovedAt         DateTime?
+  intelligenceId      String?
+
+  // AI-assigned capital budget and trading time window
+  // allocationSOL: exact SOL the AI allocated to this wallet (null = use full settings capital)
+  // trackFrom/trackUntil: UTC "HH:MM" strings — trades outside this window are skipped
+  // Both null means copy 24/7 (same behaviour as before intelligence was added)
+  allocationSOL       Float?
+  trackFrom           String?
+  trackUntil          String?
+
   // Timestamps
   addedAt             DateTime @default(now())
   lastSeenAt          DateTime?
@@ -59,6 +73,7 @@ model TrackedWallet {
   @@index([address])
   @@index([isActive])
   @@map("tracked_wallets")
+  @@index([addedByAI])
 }
 
 // ────────────────────────────────────────────────────────────
@@ -279,6 +294,31 @@ model NotificationLog {
   @@map("notification_logs")
 }
 
+model WalletIntelligence {
+  id                  String   @id @default(uuid())
+  forDate             String   @unique
+  generatedAt         DateTime @default(now())
+  capitalSOL          Float
+  walletsRecommended  Int      @default(0)
+  walletsAdded        Int      @default(0)
+  walletsRemoved      Int      @default(0)
+  reportJson          Json
+  telegramSummary     String
+  htmlReport          String
+  status              IntelligenceStatus @default(PENDING)
+  errorMessage        String?
+  addedWallets        Json     @default("[]")
+  removedWallets      Json     @default("[]")
+  confidence          Int      @default(0)
+  birdeyeDataQuality  Int      @default(0)
+  gmgnDataQuality     Int      @default(0)
+  cieloDataQuality    Int      @default(0)
+
+  @@index([forDate])
+  @@index([status])
+  @@map("wallet_intelligence")
+}
+
 // ────────────────────────────────────────────────────────────
 //  ENUMS
 // ────────────────────────────────────────────────────────────
@@ -308,4 +348,13 @@ enum NotificationType {
   WALLET_ADDED
   WALLET_REMOVED
   ERROR_ALERT
+  INTELLIGENCE_REPORT
+  INTELLIGENCE_FAILED
+}
+
+enum IntelligenceStatus {
+  PENDING
+  RUNNING
+  COMPLETE
+  FAILED
 }

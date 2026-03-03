@@ -18,7 +18,9 @@
 //    /removewallet <address>         — stop copying a wallet
 //    /pause    — pause all trading
 //    /resume   — resume trading
-//    /capital <amount> — update starting capital
+//    /capital <amount>  — update starting capital
+//    /intelligence      — show last AI wallet report
+//    /testintelligence  — trigger AI pipeline manually
 //    /help     — command list
 //
 //  Security:
@@ -35,10 +37,11 @@ const logger               = require('../utils/logger');
 const tradeRepository      = require('../execution/tradeRepository');
 
 // Handlers (built in Files 18–22)
-const pnlHandler      = require('./handlers/pnlHandler');
-const tradeNotifier   = require('./handlers/tradeNotifier');
-const walletHandler   = require('./handlers/walletHandler');
-const statusHandler   = require('./handlers/statusHandler');
+const pnlHandler         = require('./handlers/pnlHandler');
+const tradeNotifier      = require('./handlers/tradeNotifier');
+const walletHandler      = require('./handlers/walletHandler');
+const statusHandler      = require('./handlers/statusHandler');
+const walletIntelligence = require('../jobs/walletIntelligence');
 
 // ────────────────────────────────────────────────────────────
 //  BOT INSTANCE
@@ -145,6 +148,10 @@ bot.command('help', async (ctx) => {
     '/pause — Pause all trading',
     '/resume — Resume trading',
     '/capital <SOL> — Update capital',
+    '',
+    '🤖 *AI Intelligence*',
+    '/intelligence — View last AI wallet report',
+    '/testintelligence — Run AI pipeline now',
     '',
     '💡 *Examples*',
     '/addwallet CyaE1V...ga54o Cented',
@@ -301,6 +308,67 @@ bot.command('resume', async (ctx) => {
 });
 
 // ────────────────────────────────────────────────────────────
+//  /intelligence — Show last AI wallet intelligence report
+// ────────────────────────────────────────────────────────────
+
+bot.command('intelligence', async (ctx) => {
+  const last = walletIntelligence.getLastReport();
+
+  if (!last || !last.report) {
+    await ctx.replyWithMarkdown(
+      '📭 *No intelligence report available yet.*\n\n' +
+      'The AI wallet intelligence job runs nightly at 11:50 PM UTC.\n' +
+      'Use /testintelligence to trigger it manually right now.'
+    );
+    return;
+  }
+
+  const { forDate, report } = last;
+  await ctx.replyWithMarkdown(report.telegramSummary || (
+    `🤖 *AI Intelligence — ${forDate}*\n\n` +
+    `Wallets: ${report.wallets?.length || 0} selected\n` +
+    `Confidence: ${report.confidence}/100\n\n` +
+    `_Use /testintelligence to regenerate._`
+  ));
+});
+
+// ────────────────────────────────────────────────────────────
+//  /testintelligence — Manually trigger the intelligence job
+// ────────────────────────────────────────────────────────────
+
+bot.command('testintelligence', async (ctx) => {
+  await ctx.replyWithMarkdown(
+    '🤖 *Running AI wallet intelligence pipeline...*\n\n' +
+    '_Fetching from Birdeye + GMGN, scoring candidates, calling Claude AI..._\n' +
+    '_This takes 30-90 seconds. You\'ll receive the full report when done._'
+  );
+
+  // Run in background with testOnly=true so the wallet swap is skipped
+  walletIntelligence.runNow({ testOnly: true }).then(async (report) => {
+    if (!report) {
+      await send('RAW', { message: '⚠️ *Intelligence job returned no report.* Check server logs.' });
+    } else {
+      await send('RAW', {
+        message:
+          `✅ *Intelligence pipeline complete*\n\n` +
+          `Wallets selected: ${report.wallets?.length || 0}\n` +
+          `Confidence: ${report.confidence}/100\n\n` +
+          `_Wallet swap skipped (test mode). Use nightly run for live swap._`,
+      });
+      // Also send the full Telegram summary so the user sees it
+      if (report.telegramSummary) {
+        await send('RAW', { message: report.telegramSummary });
+      }
+    }
+  }).catch(async (err) => {
+    logger.error('testintelligence command failed', { error: err.message });
+    await send('RAW', {
+      message: `⚠️ *Intelligence test failed*\n\nError: ${err.message}`,
+    });
+  });
+});
+
+// ────────────────────────────────────────────────────────────
 //  /capital <amount> — Update starting capital
 // ────────────────────────────────────────────────────────────
 
@@ -388,6 +456,16 @@ async function send(type, data) {
         break;
       case 'DAILY_REPORT':
         message = tradeNotifier.formatDailyReport(data);
+        break;
+      case 'RAW':
+        // Pre-formatted markdown string — send as-is
+        message = data.message;
+        break;
+      case 'INTELLIGENCE_REPORT':
+        message = data.message || `🤖 *AI Intelligence Report Ready*\n\n${data.summary || ''}`;
+        break;
+      case 'INTELLIGENCE_FAILED':
+        message = `⚠️ *AI Intelligence Job Failed*\n\nError: ${data.error || 'Unknown error'}\n\nExisting wallets continue tracking.`;
         break;
       case 'SYSTEM_ONLINE':
         message = `🟢 *SOL SYSTEMS ONLINE*\n\nBot started and monitoring ${data.walletCount || 0} wallet(s).\nCapital: ${data.capitalSOL?.toFixed(2) || '?'} SOL`;

@@ -208,18 +208,44 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
   // ── Update tracked wallet position ────────────────────────
   positionTracker.openTrackedPosition(walletAddress, swapData);
 
-  // ── Load current settings ─────────────────────────────────
-  const settings = await tradeRepository.getSettings();
-  const myCapitalSOL = settings.myCapitalSOL;
+  // ── Load settings + tracked wallet in parallel ───────────
+  const [settings, trackedWallet] = await Promise.all([
+    tradeRepository.getSettings(),
+    tradeRepository.getTrackedWallet(walletAddress),
+  ]);
+
+  // ── Time window enforcement ───────────────────────────────
+  // If the AI assigned a tracking window, skip trades outside it.
+  // e.g. trackFrom="13:00", trackUntil="21:00" → only trade 13:00–21:00 UTC
+  if (trackedWallet?.trackFrom && trackedWallet?.trackUntil) {
+    const now  = new Date();
+    const hhmm = `${String(now.getUTCHours()).padStart(2,'0')}:${String(now.getUTCMinutes()).padStart(2,'0')}`;
+    if (hhmm < trackedWallet.trackFrom || hhmm >= trackedWallet.trackUntil) {
+      logger.info('Skipping trade — outside AI tracking window', {
+        wallet: nickname,
+        token:  tokenSymbol,
+        now:    hhmm,
+        window: `${trackedWallet.trackFrom}–${trackedWallet.trackUntil} UTC`,
+      });
+      await _recordSkippedTrade(swapData, walletAddress, walletId,
+        `Outside tracking window (${trackedWallet.trackFrom}–${trackedWallet.trackUntil} UTC)`);
+      return;
+    }
+  }
+
+  // ── Capital for position sizing ───────────────────────────
+  // Use the AI-assigned budget for this wallet (allocationSOL) when set,
+  // so we deploy exactly the slice the AI intended rather than full capital.
+  // Falls back to full settings capital for manually-added wallets.
+  const myCapitalSOL = trackedWallet?.allocationSOL || settings.myCapitalSOL;
 
   // ── Get tracked wallet's estimated capital ────────────────
-  const trackedWallet = await tradeRepository.getTrackedWallet(walletAddress);
   const trackedCapitalSOL = trackedWallet?.manualCapitalSOL
     || trackedWallet?.estimatedCapitalSOL
     || 0;
 
   if (!trackedCapitalSOL || trackedCapitalSOL === 0) {
-    logger.warn('Tracked wallet capital unknown — using fallback 1% position', {
+    logger.warn('Tracked wallet capital unknown — using fallback estimate', {
       wallet: nickname,
     });
   }
@@ -227,7 +253,7 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
   // ── Scale position size ───────────────────────────────────
   const scaling = scalePositionSize(
     trackedAmountSOL,
-    trackedCapitalSOL || (trackedAmountSOL * 10), // fallback estimate
+    trackedCapitalSOL || (trackedAmountSOL * 10), // fallback: assume trade is ~10% of cap
     myCapitalSOL,
     settings.maxPositionPct,
     settings.minSolReserve
@@ -573,6 +599,34 @@ async function _handleSell(swapData, walletAddress, walletId, nickname, detected
 
   // ── Update wallet stats ───────────────────────────────────
   await tradeRepository.updateWalletPnL(walletId, pnlSOL, isWin);
+
+  // ── Intraday wallet eviction ───────────────────────────────
+  // If this was a loss, check whether this wallet has hit a consecutive
+  // loss streak. 5+ losses in a row strongly signals the wallet's edge
+  // has broken for the day — pause it to prevent further drawdown.
+  if (!isWin) {
+    const EVICTION_THRESHOLD = 5;
+    const streak = await tradeRepository.getConsecutiveLosses(walletId);
+
+    if (streak >= EVICTION_THRESHOLD) {
+      logger.warn('Evicting wallet — consecutive loss threshold hit', {
+        wallet:   nickname,
+        streak,
+        threshold: EVICTION_THRESHOLD,
+      });
+
+      await tradeRepository.deactivateTrackedWallet(walletAddress);
+
+      await _notify('RAW', {
+        message:
+          `🚨 *Wallet Evicted — Loss Streak*\n\n` +
+          `Wallet: *${nickname}* (\`${walletAddress.slice(0, 8)}...\`)\n` +
+          `Consecutive losses: *${streak}*\n\n` +
+          `_Wallet paused until next nightly AI refresh._\n` +
+          `_Use /addwallet to re-enable manually if needed._`,
+      });
+    }
+  }
 
   // ── Send Telegram notification ────────────────────────────
   if (settings.notifyOnSell) {

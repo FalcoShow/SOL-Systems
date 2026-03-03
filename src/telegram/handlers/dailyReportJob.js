@@ -18,25 +18,34 @@
 //  Also runs a lighter "heartbeat" check every 10 minutes
 //  that verifies the system is still healthy and fires an
 //  alert if anything critical breaks silently overnight.
+//
+//  Intelligence integration (new):
+//    - Starts walletIntelligence job at 23:50 UTC nightly
+//    - Intelligence job runs the AI pipeline and schedules
+//      the wallet swap for 00:01 UTC (1 min after midnight)
+//    - At 00:00 UTC this file sends the daily PnL report
+//    - At 00:01 UTC walletIntelligence sends the AI summary
+//      and swaps in the new AI-selected wallet roster
+//    - Exports runIntelligenceNow + getLastIntelligence
+//      so bot.js can wire /testintelligence and /intelligence
 // ============================================================
 
 'use strict';
 
-const cron            = require('node-cron');
-const tradeRepository = require('../../execution/tradeRepository');
+const cron               = require('node-cron');
+const tradeRepository    = require('../../execution/tradeRepository');
 const { calculateDailyStats } = require('../../utils/calculator');
-const { _format24hReport }    = require('./pnlHandler');
 const { formatDailyReport }   = require('./tradeNotifier');
-const { getSOLPrice, getSOLBalance } = require('../../utils/solana');
-const walletMonitor   = require('../../monitor/walletMonitor');
-const config          = require('../../config');
-const logger          = require('../../utils/logger');
+const { getSOLPrice }    = require('../../utils/solana');
+const walletMonitor      = require('../../monitor/walletMonitor');
+const walletIntelligence = require('../../jobs/walletIntelligence');
+const logger             = require('../../utils/logger');
 
 // ────────────────────────────────────────────────────────────
 //  STATE
 // ────────────────────────────────────────────────────────────
 
-// Telegram send function — injected from bot.js
+// Telegram send function — injected from bot.js via index.js
 let _sendFn = null;
 
 // Cron job handles so we can stop them cleanly
@@ -45,7 +54,7 @@ let _heartbeatJob = null;
 
 // Track consecutive heartbeat failures before alerting
 let _heartbeatFailCount = 0;
-const ALERT_AFTER_FAILURES = 3; // Alert after 3 consecutive bad checks (30 min)
+const ALERT_AFTER_FAILURES = 3; // Alert after 3 consecutive bad checks (~30 min)
 
 // ────────────────────────────────────────────────────────────
 //  INITIALIZATION
@@ -54,14 +63,15 @@ const ALERT_AFTER_FAILURES = 3; // Alert after 3 consecutive bad checks (30 min)
 /**
  * Start all scheduled jobs.
  * Call this once at app startup after the Telegram bot is ready.
+ * Also starts the walletIntelligence nightly job (23:50 UTC).
  *
  * @param {Function} sendFn - The bot.send() function from bot.js
  */
 function start(sendFn) {
   _sendFn = sendFn;
 
-  // ── Daily report at midnight UTC ────────────────────────
-  // "0 0 * * *" = minute 0, hour 0, every day, every month, every weekday
+  // ── Daily PnL report at midnight UTC ────────────────────
+  // "0 0 * * *" = minute 0, hour 0, every day
   _dailyJob = cron.schedule('0 0 * * *', async () => {
     logger.info('Daily report job triggered');
     await runDailyReport();
@@ -77,18 +87,26 @@ function start(sendFn) {
     timezone: 'UTC',
   });
 
+  // ── AI Wallet Intelligence job (23:50 UTC nightly) ───────
+  // Runs 10 minutes before midnight so the AI report is ready
+  // by the time the daily PnL report fires at 00:00 UTC.
+  // The wallet swap itself fires at 00:01 UTC (inside that job).
+  walletIntelligence.start(sendFn);
+
   logger.info('Scheduled jobs started', {
-    dailyReport: '00:00 UTC daily',
-    heartbeat:   'every 10 minutes',
+    dailyReport:  '00:00 UTC daily',
+    heartbeat:    'every 10 minutes',
+    intelligence: '23:50 UTC nightly',
   });
 }
 
 /**
- * Stop all scheduled jobs cleanly.
+ * Stop all scheduled jobs cleanly including intelligence.
  */
 function stop() {
   if (_dailyJob)     { _dailyJob.stop();     _dailyJob = null; }
   if (_heartbeatJob) { _heartbeatJob.stop(); _heartbeatJob = null; }
+  walletIntelligence.stop();
   logger.info('Scheduled jobs stopped');
 }
 
@@ -98,9 +116,10 @@ function stop() {
 // ────────────────────────────────────────────────────────────
 
 /**
- * Generate, save, and send the daily report.
- * Also handles daily loss limit checks and resets.
- * Can be called manually for testing: require and call directly.
+ * Generate, save, and send the daily PnL report.
+ * Also handles daily loss limit checks and auto-pause.
+ * Also previews the intelligence report if it's ready.
+ * Can be called manually: node -e "require('./dailyReportJob').runDailyReport()"
  */
 async function runDailyReport() {
   try {
@@ -110,11 +129,11 @@ async function runDailyReport() {
     // At midnight, "yesterday" is the day that just ended
     const yesterday = new Date();
     yesterday.setUTCDate(yesterday.getUTCDate() - 1);
-    const dateStr = yesterday.toISOString().split('T')[0]; // "2024-03-01"
+    const dateStr   = yesterday.toISOString().split('T')[0]; // "2026-03-03"
     const dateLabel = yesterday.toLocaleDateString('en-US', {
-      weekday: 'long',
-      month:   'long',
-      day:     'numeric',
+      weekday:  'long',
+      month:    'long',
+      day:      'numeric',
       timeZone: 'UTC',
     });
 
@@ -154,8 +173,8 @@ async function runDailyReport() {
       roiPct:              stats.roiPct,
       feesSOL:             stats.feesSOL,
       avgExecutionMs:      stats.avgExecutionMs,
-      bestTradePnLPct:     stats.bestTrade?.pnlPct   || null,
-      worstTradePnLPct:    stats.worstTrade?.pnlPct  || null,
+      bestTradePnLPct:     stats.bestTrade?.pnlPct      || null,
+      worstTradePnLPct:    stats.worstTrade?.pnlPct     || null,
       bestTokenSymbol:     stats.bestTrade?.tokenSymbol  || null,
       worstTokenSymbol:    stats.worstTrade?.tokenSymbol || null,
       capitalSOL:          settings.myCapitalSOL,
@@ -164,23 +183,38 @@ async function runDailyReport() {
     // ── Send Telegram daily report ────────────────────────
     const message = formatDailyReport({
       stats,
-      capitalSOL: settings.myCapitalSOL,
+      capitalSOL:  settings.myCapitalSOL,
       solPriceUSD,
-      date: dateLabel,
+      date:        dateLabel,
     });
 
-    await _send('DAILY_REPORT', { message, stats, capitalSOL: settings.myCapitalSOL, solPriceUSD, date: dateLabel });
+    await _send('DAILY_REPORT', {
+      message,
+      stats,
+      capitalSOL:  settings.myCapitalSOL,
+      solPriceUSD,
+      date:        dateLabel,
+    });
 
     logger.info('Daily report sent', {
-      date:        dateStr,
-      netPnL:      stats.netPnLSOL.toFixed(4) + ' SOL',
-      trades:      stats.totalTrades,
-      winRate:     stats.winRatePct.toFixed(1) + '%',
+      date:    dateStr,
+      netPnL:  stats.netPnLSOL.toFixed(4) + ' SOL',
+      trades:  stats.totalTrades,
+      winRate: stats.winRatePct.toFixed(1) + '%',
     });
 
+    // ── Intelligence report preview ───────────────────────
+    // If the 23:50 intelligence job finished in time, preview it.
+    // The full AI summary + wallet swap fires at 00:01 (that job's timer).
+    const lastIntel = walletIntelligence.getLastReport();
+    if (lastIntel && lastIntel.forDate === _tomorrowDateStr()) {
+      await _sendRaw(
+        `🤖 _AI wallet intelligence report is ready._\n` +
+        `_New wallet roster will activate in ~1 minute..._`
+      ).catch(() => {});
+    }
+
     // ── Daily loss limit check ────────────────────────────
-    // After the day ends, check if we hit the limit
-    // Auto-pause if we did and notify the user
     if (settings.dailyLossLimitSOL > 0) {
       const lossSOL = Math.abs(Math.min(stats.netPnLSOL, 0));
       if (lossSOL >= settings.dailyLossLimitSOL) {
@@ -190,7 +224,8 @@ async function runDailyReport() {
         });
 
         await tradeRepository.pauseTrading(
-          `Daily loss limit hit: ${lossSOL.toFixed(4)} SOL lost (limit: ${settings.dailyLossLimitSOL} SOL)`
+          `Daily loss limit hit: ${lossSOL.toFixed(4)} SOL lost ` +
+          `(limit: ${settings.dailyLossLimitSOL} SOL)`
         );
 
         await _sendRaw(
@@ -206,8 +241,8 @@ async function runDailyReport() {
   } catch (err) {
     logger.error('Daily report job failed', { error: err.message, stack: err.stack });
 
-    // Still try to notify about the failure
-    await _sendRaw('⚠️ *Daily report generation failed*\n\n' +
+    await _sendRaw(
+      `⚠️ *Daily report generation failed*\n\n` +
       `Error: ${err.message}\n\nCheck server logs.`
     ).catch(() => {});
   }
@@ -226,27 +261,23 @@ async function runDailyReport() {
 async function runHeartbeat() {
   try {
     const checks = await Promise.allSettled([
-      tradeRepository.healthCheck(),        // DB alive?
+      tradeRepository.healthCheck(),
     ]);
 
-    const dbOk     = checks[0]?.status === 'fulfilled' && checks[0]?.value === true;
-    const wsOk     = walletMonitor.getStatus().wsConnected;
-    const allOk    = dbOk && wsOk;
+    const dbOk  = checks[0]?.status === 'fulfilled' && checks[0]?.value === true;
+    const wsOk  = walletMonitor.getStatus().wsConnected;
+    const allOk = dbOk && wsOk;
 
     if (allOk) {
-      // Reset failure counter on success
       if (_heartbeatFailCount > 0) {
         logger.info('Heartbeat: system recovered', { failCount: _heartbeatFailCount });
         _heartbeatFailCount = 0;
-
-        // Send recovery alert if we had been failing
         await _sendRaw('🟢 *System recovered*\n\nAll connections restored.').catch(() => {});
       }
       _heartbeatFailCount = 0;
       return;
     }
 
-    // Something is wrong
     _heartbeatFailCount++;
 
     logger.warn('Heartbeat check failed', {
@@ -268,7 +299,7 @@ async function runHeartbeat() {
         `Check /status for details.`
       ).catch(() => {});
 
-      // Reset counter so we don't spam — next alert after another 3 failures
+      // Reset counter — next alert after another 3 failures
       _heartbeatFailCount = 0;
     }
 
@@ -282,10 +313,7 @@ async function runHeartbeat() {
 //  HELPERS
 // ────────────────────────────────────────────────────────────
 
-/**
- * Send a notification via the injected send function.
- * @private
- */
+/** Send a typed notification via the injected send function. */
 async function _send(type, data) {
   if (!_sendFn) {
     logger.warn('dailyReportJob: sendFn not set, skipping notification');
@@ -294,14 +322,17 @@ async function _send(type, data) {
   return _sendFn(type, data);
 }
 
-/**
- * Send a raw markdown string directly to Telegram.
- * Used for messages that don't fit a standard type.
- * @private
- */
+/** Send a raw markdown string directly to Telegram. */
 async function _sendRaw(markdownText) {
   if (!_sendFn) return;
   return _sendFn('RAW', { message: markdownText });
+}
+
+/** Return tomorrow's date string "YYYY-MM-DD" in UTC. */
+function _tomorrowDateStr() {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().split('T')[0];
 }
 
 // ────────────────────────────────────────────────────────────
@@ -311,6 +342,10 @@ async function _sendRaw(markdownText) {
 module.exports = {
   start,
   stop,
-  runDailyReport,   // Exported so you can test with: node -e "require('./dailyReportJob').runDailyReport()"
+  runDailyReport,   // test: node -e "require('./dailyReportJob').runDailyReport()"
   runHeartbeat,
+
+  // Intelligence pass-throughs — used by bot.js for /testintelligence, /intelligence
+  runIntelligenceNow:  walletIntelligence.runNow,
+  getLastIntelligence: walletIntelligence.getLastReport,
 };
