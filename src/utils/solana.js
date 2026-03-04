@@ -472,39 +472,40 @@ async function getTokenMetadata(mintAddress) {
     return _metadataCache.get(mintAddress);
   }
 
-  try {
-    // Jupiter token list — use current API (token.jup.ag was deprecated)
-    const url = `https://tokens.jup.ag/tokens/v1`;
-    const response = await axios.get(url, { timeout: 10000 });
-    const tokens = response.data || [];
+  // Strategy 1: Try Jupiter token list (builds full cache on first call)
+  if (!_jupiterFetchFailed) {
+    try {
+      const url = `https://api.jup.ag/tokens/v1`;
+      const response = await axios.get(url, { timeout: 10000 });
+      const tokens = response.data || [];
 
-    // Build the full cache in one shot so future lookups are instant
-    for (const token of tokens) {
-      _metadataCache.set(token.address, {
-        symbol: token.symbol || 'UNKNOWN',
-        name:   token.name   || 'Unknown Token',
-        logoURI: token.logoURI || null,
+      // Build the full cache in one shot so future lookups are instant
+      for (const token of tokens) {
+        _metadataCache.set(token.address, {
+          symbol: token.symbol || 'UNKNOWN',
+          name:   token.name   || 'Unknown Token',
+          logoURI: token.logoURI || null,
+        });
+      }
+
+      if (_metadataCache.has(mintAddress)) {
+        return _metadataCache.get(mintAddress);
+      }
+    } catch (err) {
+      // Mark Jupiter as failed so we don't retry DNS failures on every call
+      _jupiterFetchFailed = true;
+      logger.warn('Jupiter token list unavailable — using Helius for metadata', {
+        error: err.message,
       });
     }
-
-    // Return the one we were asked for
-    if (_metadataCache.has(mintAddress)) {
-      return _metadataCache.get(mintAddress);
-    }
-
-    // Token not in Jupiter list — likely a brand new memecoin
-    // Try Helius as fallback
-    return await _getTokenMetadataHelius(mintAddress);
-
-  } catch (err) {
-    logger.warn('Failed to get token metadata from Jupiter', {
-      mint: shortenAddress(mintAddress),
-      error: err.message,
-    });
-    // Return placeholder so the rest of the system keeps working
-    return { symbol: mintAddress.slice(0, 6) + '...', name: 'Unknown Token' };
   }
+
+  // Strategy 2: Helius DAS API (always available, per-token)
+  return await _getTokenMetadataHelius(mintAddress);
 }
+
+// Track if Jupiter token list fetch failed so we don't retry DNS failures repeatedly
+let _jupiterFetchFailed = false;
 
 /**
  * Fallback metadata fetch via Helius DAS API.

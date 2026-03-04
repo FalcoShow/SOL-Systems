@@ -21,6 +21,11 @@ const express          = require('express');
 const { PrismaClient } = require('@prisma/client');
 const logger           = require('../../utils/logger');
 const { calculateWinRate } = require('../../utils/calculator');
+const { getSOLBalance, getSOLPrice } = require('../../utils/solana');
+const config           = require('../../config');
+const walletMonitor    = require('../../monitor/walletMonitor');
+const positionTracker  = require('../../monitor/positionTracker');
+const tradeExecutor    = require('../../execution/tradeExecutor');
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -283,22 +288,55 @@ router.get('/overview', async (req, res) => {
       trades24h,
       tradesAllTime,
       openPositions,
+      wallets,
+      balance,
+      solPrice,
     ] = await Promise.all([
       prisma.settings.findFirst(),
       prisma.trade.findMany({ where: { isOpen: false, createdAt: { gte: since } } }),
       prisma.trade.findMany({ where: { isOpen: false } }),
-      prisma.trade.findMany({ where: { isOpen: true  } }),
+      prisma.trade.findMany({ where: { isOpen: true, status: 'CONFIRMED' } }),
+      prisma.trackedWallet.findMany({ where: { isActive: true } }),
+      getSOLBalance(config.wallet?.publicKey).catch(() => 0),
+      getSOLPrice().catch(() => 0),
     ]);
 
-    const calc24h    = summary(trades24h);
+    const calc24h     = summary(trades24h);
     const calcAllTime = summary(tradesAllTime);
+    const mon         = walletMonitor.getStatus?.()    ?? {};
+    const pos         = positionTracker.getSummary?.()  ?? {};
+    const exec        = tradeExecutor.getStatus?.()    ?? {};
 
     return res.json({
-      isTradingPaused:   settings?.isTradingPaused  ?? false,
-      myCapitalSOL:      settings?.myCapitalSOL      ?? 10,
-      openPositionCount: openPositions.length,
-      last24h:           calc24h,
-      allTime:           calcAllTime,
+      stats24h:  calc24h,
+      statsAll:  calcAllTime,
+      positions: {
+        openCount:          pos.openCount ?? openPositions.length,
+        totalInvestedSOL:   pos.totalInvestedSOL ?? 0,
+        totalUnrealizedSOL: pos.totalUnrealizedSOL ?? 0,
+        totalUnrealizedPct: pos.totalUnrealizedPct ?? 0,
+      },
+      wallet: {
+        balance,
+        solPriceUSD:  solPrice,
+        balanceUSD:   parseFloat((balance * solPrice).toFixed(2)),
+      },
+      system: {
+        wsConnected:         mon.wsConnected ?? false,
+        trackedWallets:      wallets.length,
+        activeSubscriptions: mon.activeSubscriptions ?? 0,
+        queueSize:           exec.queueSize ?? 0,
+        uptime:              process.uptime(),
+      },
+      settings: {
+        isTradingPaused:   settings?.isTradingPaused  ?? false,
+        myCapitalSOL:      settings?.myCapitalSOL      ?? 10,
+        maxPositionPct:    settings?.maxPositionPct     ?? 0.1,
+        maxOpenPositions:  settings?.maxOpenPositions   ?? 10,
+        dailyLossLimitSOL: settings?.dailyLossLimitSOL  ?? 2,
+        maxSlippageBps:    settings?.maxSlippageBps     ?? 100,
+        minSolReserve:     settings?.minSolReserve      ?? 0.1,
+      },
     });
 
   } catch (err) {
@@ -312,12 +350,22 @@ function summary(trades) {
   const total  = trades.length;
   const wins   = trades.filter((t) => (t.pnlSOL || 0) > 0).length;
   const pnlSOL = trades.reduce((s, t) => s + (t.pnlSOL || 0), 0);
+  const pnlUSD = trades.reduce((s, t) => s + (t.pnlUSD || 0), 0);
+  const execTimes = trades.map(t => t.executionMs).filter(Boolean);
+  const avgMs  = execTimes.length > 0
+    ? Math.round(execTimes.reduce((s, v) => s + v, 0) / execTimes.length)
+    : 0;
+
   return {
-    totalTrades:  total,
+    totalTrades:    total,
     wins,
-    losses:       total - wins,
-    winRate:      parseFloat(calculateWinRate(wins, total).toFixed(2)),
-    netPnlSOL:    parseFloat(pnlSOL.toFixed(6)),
+    losses:         total - wins,
+    winRate:        parseFloat(calculateWinRate(wins, total).toFixed(2)),
+    winRatePct:     parseFloat(calculateWinRate(wins, total).toFixed(2)),
+    netPnlSOL:      parseFloat(pnlSOL.toFixed(6)),
+    netPnLSOL:      parseFloat(pnlSOL.toFixed(6)),
+    netPnLUSD:      parseFloat(pnlUSD.toFixed(2)),
+    avgExecutionMs: avgMs,
   };
 }
 
