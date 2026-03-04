@@ -258,7 +258,7 @@ async function _fetchWalletStats(apiKey, address) {
     const sevenDaysAgo = now - (7 * 24 * 60 * 60);
 
     const response = await rateLimiter.request(() =>
-      axios.get(`${BIRDEYE_BASE}/trader/txs/seek-by-time`, {
+      axios.get(`${BIRDEYE_BASE}/trader/txs/seek_by_time`, {
         params: {
           address,
           tx_type:   'swap',
