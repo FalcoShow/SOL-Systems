@@ -412,6 +412,23 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
     });
   }
 
+  // ── Final balance guard — prevent ghost trades ────────────
+  // Re-check balance right before committing to DB. If wallet has
+  // insufficient SOL for even the minimum trade, skip entirely rather
+  // than creating a DB record we can never fill.
+  const MIN_EXECUTABLE_SOL = 0.01;
+  if (currentSOLBalance < (settings.minSolReserve || 0.1) + MIN_EXECUTABLE_SOL) {
+    logger.warn('Skipping BUY — wallet balance too low to execute', {
+      wallet: nickname,
+      token:  tokenSymbol,
+      balance: currentSOLBalance.toFixed(4),
+      needed:  ((settings.minSolReserve || 0.1) + MIN_EXECUTABLE_SOL).toFixed(4),
+    });
+    await _recordSkippedTrade(swapData, walletAddress, walletId,
+      `Insufficient balance: ${currentSOLBalance.toFixed(4)} SOL`);
+    return;
+  }
+
   // ── Record the wallet trade in DB ─────────────────────────
   const walletTradeRecord = await tradeRepository.recordWalletTrade({
     trackedWalletId:   walletId,
@@ -473,6 +490,7 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
       status:       'FAILED',
       errorMessage: swapResult.error,
       submittedAt,
+      isOpen:       false,   // Mark closed — prevents ghost positions
     });
 
     await _notify('TRADE_FAILED', {
@@ -647,6 +665,7 @@ async function _handleSell(swapData, walletAddress, walletId, nickname, detected
       status:       'FAILED',
       errorMessage: swapResult.error,
       submittedAt,
+      isOpen:       false,   // Mark closed — prevents ghost positions
     });
 
     await _notify('TRADE_FAILED', {

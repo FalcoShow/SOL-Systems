@@ -65,6 +65,12 @@ async function main() {
   logger.info('[2/14] Connecting to database...');
   await tradeRepository.connect();
 
+  // Clean up ghost positions from previous runs (FAILED/PENDING trades stuck as isOpen=true)
+  const cleanup = await tradeRepository.cleanupGhostPositions();
+  if (cleanup.closedCount > 0) {
+    logger.info(`[Startup] Cleaned up ${cleanup.closedCount} ghost position(s)`);
+  }
+
   logger.info('[3/14] Loading settings...');
   const settings = await tradeRepository.getSettings();
   logger.info('Settings loaded', {

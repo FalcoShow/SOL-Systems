@@ -100,7 +100,7 @@ router.get('/', async (req, res) => {
 router.get('/open', async (req, res) => {
   try {
     const openTrades = await prisma.trade.findMany({
-      where:   { isOpen: true },
+      where:   { isOpen: true, status: 'CONFIRMED' },
       orderBy: { createdAt: 'desc' },
     });
 

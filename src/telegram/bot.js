@@ -153,6 +153,7 @@ bot.command('help', async (ctx) => {
     '/intelligence — View last AI wallet report',
     '/testintelligence — Run AI pipeline (dry run)',
     '/golive — Run AI pipeline + activate wallets',
+    '/cleanup — Purge ghost positions from DB',
     '',
     '💡 *Examples*',
     '/addwallet CyaE1V...ga54o Cented',
@@ -402,6 +403,27 @@ bot.command('golive', async (ctx) => {
       message: `⚠️ *Go-live failed*\n\nError: ${err.message}`,
     });
   });
+});
+
+// ────────────────────────────────────────────────────────────
+//  /cleanup — Purge ghost positions from DB
+// ────────────────────────────────────────────────────────────
+
+bot.command('cleanup', async (ctx) => {
+  try {
+    const result = await tradeRepository.cleanupGhostPositions();
+    if (result.closedCount === 0) {
+      await ctx.replyWithMarkdown('✅ *No ghost positions found* — database is clean.');
+    } else {
+      await ctx.replyWithMarkdown(
+        `🧹 *Cleanup complete*\n\nClosed ${result.closedCount} ghost position(s) ` +
+        `(FAILED/PENDING/empty trades that were stuck as "open").`
+      );
+    }
+  } catch (err) {
+    logger.error('cleanup command failed', { error: err.message });
+    await ctx.replyWithMarkdown(`⚠️ *Cleanup failed:* ${err.message}`);
+  }
 });
 
 // ────────────────────────────────────────────────────────────

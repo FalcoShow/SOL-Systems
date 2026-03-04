@@ -858,6 +858,51 @@ function _generateId() {
 }
 
 // ────────────────────────────────────────────────────────────
+//  GHOST POSITION CLEANUP
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Close all "ghost" positions — trades marked as isOpen=true that are
+ * FAILED or PENDING (never confirmed). These block the max positions limit
+ * and clutter the dashboard.
+ *
+ * Also catches any CONFIRMED BUY with 0 amountTokens / 0 executedAmountSOL
+ * as those are effectively empty positions.
+ *
+ * @returns {Promise<{ closedCount: number }>}
+ */
+async function cleanupGhostPositions() {
+  try {
+    const result = await prisma.trade.updateMany({
+      where: {
+        isOpen: true,
+        OR: [
+          { status: 'FAILED' },
+          { status: 'PENDING' },
+          {
+            status: 'CONFIRMED',
+            executedAmountSOL: { lte: 0 },
+          },
+        ],
+      },
+      data: {
+        isOpen:    false,
+        updatedAt: new Date(),
+      },
+    });
+
+    if (result.count > 0) {
+      logger.info(`[Cleanup] Closed ${result.count} ghost position(s)`);
+    }
+
+    return { closedCount: result.count };
+  } catch (err) {
+    logger.error('Ghost position cleanup failed', { error: err.message });
+    return { closedCount: 0 };
+  }
+}
+
+// ────────────────────────────────────────────────────────────
 //  EXPORTS
 // ────────────────────────────────────────────────────────────
 
@@ -882,6 +927,7 @@ module.exports = {
   recordWalletTrade,
   recordMyTrade,
   updateTradeStatus,
+  cleanupGhostPositions,
 
   // Trade reads
   getOpenTrades,
