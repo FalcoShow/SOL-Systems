@@ -411,14 +411,27 @@ bot.command('golive', async (ctx) => {
 
 bot.command('cleanup', async (ctx) => {
   try {
-    const result = await tradeRepository.cleanupGhostPositions();
-    if (result.closedCount === 0) {
-      await ctx.replyWithMarkdown('✅ *No ghost positions found* — database is clean.');
+    // Step 1: Close ghost positions (set isOpen=false)
+    const closed = await tradeRepository.cleanupGhostPositions();
+
+    // Step 2: Purge ghost trade records entirely (FAILED/SKIPPED/PENDING with 0 SOL)
+    const purged = await tradeRepository.purgeGhostTrades();
+
+    const total = closed.closedCount + purged.deletedTrades;
+    if (total === 0) {
+      await ctx.replyWithMarkdown('✅ *No ghost positions or trades found* — database is clean.');
     } else {
-      await ctx.replyWithMarkdown(
-        `🧹 *Cleanup complete*\n\nClosed ${result.closedCount} ghost position(s) ` +
-        `(FAILED/PENDING/empty trades that were stuck as "open").`
-      );
+      const lines = ['🧹 *Cleanup complete*', ''];
+      if (closed.closedCount > 0) {
+        lines.push(`• Closed ${closed.closedCount} ghost position(s)`);
+      }
+      if (purged.deletedTrades > 0) {
+        lines.push(`• Deleted ${purged.deletedTrades} empty trade record(s)`);
+      }
+      if (purged.deletedWalletTrades > 0) {
+        lines.push(`• Deleted ${purged.deletedWalletTrades} orphaned wallet trade(s)`);
+      }
+      await ctx.replyWithMarkdown(lines.join('\n'));
     }
   } catch (err) {
     logger.error('cleanup command failed', { error: err.message });

@@ -473,9 +473,9 @@ async function getTokenMetadata(mintAddress) {
   }
 
   try {
-    // Jupiter token list is comprehensive and fast
-    const url = `https://token.jup.ag/all`;
-    const response = await axios.get(url, { timeout: 5000 });
+    // Jupiter token list — use current API (token.jup.ag was deprecated)
+    const url = `https://tokens.jup.ag/tokens/v1`;
+    const response = await axios.get(url, { timeout: 10000 });
     const tokens = response.data || [];
 
     // Build the full cache in one shot so future lookups are instant
@@ -557,7 +557,7 @@ async function _getTokenMetadataHelius(mintAddress) {
  */
 async function getTokenPrice(mintAddress) {
   try {
-    const url = `https://price.jup.ag/v4/price?ids=${mintAddress}`;
+    const url = `https://api.jup.ag/price/v2?ids=${mintAddress}`;
     const response = await axios.get(url, { timeout: 5000 });
     const priceData = response.data?.data?.[mintAddress];
 

@@ -392,6 +392,15 @@ async function recordMyTrade(data) {
       },
     });
   } catch (err) {
+    // Duplicate walletTradeId — already recorded this trade
+    if (err.code === 'P2002') {
+      logger.debug('Trade already recorded (duplicate)', {
+        walletTradeId: data.walletTradeId,
+      });
+      return await prisma.trade.findFirst({
+        where: { walletTradeId: data.walletTradeId },
+      });
+    }
     logger.error('Failed to record our trade', { error: err.message });
     throw err;
   }
@@ -902,6 +911,70 @@ async function cleanupGhostPositions() {
   }
 }
 
+/**
+ * Delete all ghost/empty trade records from the database entirely.
+ * Removes FAILED, SKIPPED, and PENDING trades that have 0 SOL executed.
+ * Also removes their associated wallet trade records if orphaned.
+ *
+ * @returns {Promise<{ deletedTrades: number, deletedWalletTrades: number }>}
+ */
+async function purgeGhostTrades() {
+  try {
+    // Find all ghost trade IDs and their walletTradeIds
+    const ghostTrades = await prisma.trade.findMany({
+      where: {
+        OR: [
+          { status: 'FAILED' },
+          { status: 'SKIPPED' },
+          { status: 'PENDING' },
+          {
+            status: 'CONFIRMED',
+            executedAmountSOL: { lte: 0 },
+          },
+        ],
+      },
+      select: { id: true, walletTradeId: true },
+    });
+
+    if (ghostTrades.length === 0) {
+      return { deletedTrades: 0, deletedWalletTrades: 0 };
+    }
+
+    const tradeIds       = ghostTrades.map(t => t.id);
+    const walletTradeIds = ghostTrades.map(t => t.walletTradeId).filter(Boolean);
+
+    // Delete our ghost trades first (foreign key dependency)
+    const deletedTrades = await prisma.trade.deleteMany({
+      where: { id: { in: tradeIds } },
+    });
+
+    // Delete orphaned wallet trades (only those not referenced by remaining trades)
+    let deletedWalletTrades = 0;
+    if (walletTradeIds.length > 0) {
+      // Check which wallet trades are still referenced by real trades
+      const stillReferenced = await prisma.trade.findMany({
+        where: { walletTradeId: { in: walletTradeIds } },
+        select: { walletTradeId: true },
+      });
+      const stillReferencedIds = new Set(stillReferenced.map(t => t.walletTradeId));
+      const orphanedIds = walletTradeIds.filter(id => !stillReferencedIds.has(id));
+
+      if (orphanedIds.length > 0) {
+        const result = await prisma.walletTrade.deleteMany({
+          where: { id: { in: orphanedIds } },
+        });
+        deletedWalletTrades = result.count;
+      }
+    }
+
+    logger.info(`[Cleanup] Purged ${deletedTrades.count} ghost trade(s) and ${deletedWalletTrades} wallet trade(s)`);
+    return { deletedTrades: deletedTrades.count, deletedWalletTrades };
+  } catch (err) {
+    logger.error('Ghost trade purge failed', { error: err.message });
+    return { deletedTrades: 0, deletedWalletTrades: 0 };
+  }
+}
+
 // ────────────────────────────────────────────────────────────
 //  EXPORTS
 // ────────────────────────────────────────────────────────────
@@ -928,6 +1001,7 @@ module.exports = {
   recordMyTrade,
   updateTradeStatus,
   cleanupGhostPositions,
+  purgeGhostTrades,
 
   // Trade reads
   getOpenTrades,

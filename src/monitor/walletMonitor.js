@@ -120,6 +120,10 @@ class WalletMonitor extends EventEmitter {
       this._trackedWallets.set(wallet.address, wallet);
     }
 
+    // Pre-seed _lastSignature so the first poll cycle doesn't
+    // catch old transactions from before this boot.
+    await this._initializeLastSignatures();
+
     // Open WebSocket connection
     await this._connect();
 
@@ -703,6 +707,35 @@ class WalletMonitor extends EventEmitter {
   //  Catches trades that the WebSocket might have missed
   //  Runs every 10 seconds as a safety net
   // ──────────────────────────────────────────────────────────
+
+  /**
+   * Pre-seed _lastSignature for each wallet so the first poll
+   * cycle only catches genuinely NEW transactions, not old ones
+   * from before this boot.
+   * @private
+   */
+  async _initializeLastSignatures() {
+    const connection = getConnection();
+    for (const [address, wallet] of this._trackedWallets.entries()) {
+      try {
+        const sigs = await connection.getSignaturesForAddress(
+          new PublicKey(address),
+          { limit: 1, commitment: 'confirmed' }
+        );
+        if (sigs && sigs.length > 0) {
+          this._lastSignature.set(address, sigs[0].signature);
+          this._markSeenSignature(sigs[0].signature);
+        }
+      } catch (err) {
+        logger.debug('Failed to seed last signature for wallet', {
+          wallet: wallet.nickname, error: err.message,
+        });
+      }
+    }
+    logger.info('Pre-seeded last signatures for polling', {
+      walletCount: this._lastSignature.size,
+    });
+  }
 
   /**
    * Poll each tracked wallet's recent signatures and check for
