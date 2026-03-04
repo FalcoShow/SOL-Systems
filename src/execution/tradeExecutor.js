@@ -388,6 +388,34 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
     return;
   }
 
+  // ── Token safety checks (honeypot, freeze auth, liquidity, age) ──
+  const solPriceUSD     = await getSOLPrice().catch(() => 0);
+  const tokenSafetyCheck = await riskManager.checkTokenSafety(
+    tokenMint,
+    riskCheck.finalPositionSOL,
+    solPriceUSD,
+  );
+
+  if (!tokenSafetyCheck.safe) {
+    logger.warn('Token failed safety checks — skipping BUY', {
+      wallet:  nickname,
+      token:   tokenSymbol,
+      reason:  tokenSafetyCheck.blockReason,
+      warnings: tokenSafetyCheck.warnings,
+    });
+    await _recordSkippedTrade(swapData, walletAddress, walletId,
+      `Token safety: ${tokenSafetyCheck.blockReason}`);
+    return;
+  }
+
+  if (tokenSafetyCheck.warnings.length > 0) {
+    logger.warn('Token safety warnings (proceeding with caution)', {
+      wallet:   nickname,
+      token:    tokenSymbol,
+      warnings: tokenSafetyCheck.warnings,
+    });
+  }
+
   // Apply stale entry and market regime multipliers
   const regimeMultiplier = marketRegime.getMultiplier();
 

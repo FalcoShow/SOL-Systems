@@ -50,7 +50,8 @@ router.get('/', async (req, res) => {
     const skip = (Math.max(parseInt(page) || 1, 1) - 1) * take;
 
     // Build where clause from filters
-    const where = {};
+    // Default: only show CONFIRMED trades (hide SKIPPED/FAILED/PENDING ghosts)
+    const where = { status: 'CONFIRMED' };
 
     if (wallet) where.trackedWalletAddress = wallet;
 
