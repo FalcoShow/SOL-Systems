@@ -469,8 +469,8 @@ function _calculateStats(txs, walletAddr) {
     : 0;
 
   // Estimate capital from largest SOL amount
-  const estCapSOL = solAmounts.length > 0
-    ? Math.max(...solAmounts) * 10
+const estCapSOL = solAmounts.length > 0
+    ? Math.min(Math.max(...solAmounts) * 5, 500)  // cap at 500 SOL
     : 0;
 
   // Trades in last 7 days (filter to actual 7d window)
@@ -479,35 +479,30 @@ function _calculateStats(txs, walletAddr) {
   const trades7dCount = trades7dOnly.length;
   const tradesPerDay  = parseFloat((trades7dCount / 7).toFixed(1));
 
-  // Estimate 7d PnL from matched trades
-  let pnl7dUSD = 0;
-  // Rough PnL in SOL terms, convert to USD estimate using ~$150/SOL
-  for (const tx of sorted) {
-    const swap = tx.events?.swap;
-    if (!swap) continue;
-    if (swap.nativeOutput?.amount) {
-      const inputMint = swap.tokenInputs?.[0]?.mint
-        || swap.innerSwaps?.[0]?.tokenInputs?.[0]?.mint;
-      if (inputMint && inputMint !== SOL_MINT) {
-        // This is a sell — approximate profit
-        const solReceived = swap.nativeOutput.amount / 1e9;
-        pnl7dUSD += solReceived * 150; // rough USD
-      }
-    }
-  }
-  // Subtract buys
-  for (const tx of sorted) {
+// 7d PnL: use matched buy/sell pairs only (accurate)
+  // Re-run a clean pass using the same pairing logic
+  const buysForPnl = new Map();
+  let pnlSOL = 0;
+  for (const tx of sorted.filter(t => t.timestamp >= now7dAgo)) {
     const swap = tx.events?.swap;
     if (!swap) continue;
     if (swap.nativeInput?.amount) {
       const outputMint = swap.tokenOutputs?.[0]?.mint
         || swap.innerSwaps?.[0]?.tokenOutputs?.[0]?.mint;
       if (outputMint && outputMint !== SOL_MINT) {
-        const solSpent = swap.nativeInput.amount / 1e9;
-        pnl7dUSD -= solSpent * 150;
+        buysForPnl.set(outputMint, swap.nativeInput.amount / 1e9);
+      }
+    }
+    if (swap.nativeOutput?.amount) {
+      const inputMint = swap.tokenInputs?.[0]?.mint
+        || swap.innerSwaps?.[0]?.tokenInputs?.[0]?.mint;
+      if (inputMint && inputMint !== SOL_MINT && buysForPnl.has(inputMint)) {
+        pnlSOL += (swap.nativeOutput.amount / 1e9) - buysForPnl.get(inputMint);
+        buysForPnl.delete(inputMint);
       }
     }
   }
+  const pnl7dUSD = parseFloat((pnlSOL * 150).toFixed(2));
 
   // Top tokens by frequency (for diversity scoring)
   const topTokens = [...tokensSeen.entries()]

@@ -31,6 +31,10 @@ model TrackedWallet {
   nickname            String   // e.g. "Cented"
   isActive            Boolean  @default(true)
 
+  performanceScore     Float?
+  performanceScoredAt  DateTime?
+  performanceTrades    Int?       @default(0)
+
   // Capital estimation
   // We analyze the wallet's history to estimate their total SOL capital
   // This is used to calculate the scaling ratio against our capital

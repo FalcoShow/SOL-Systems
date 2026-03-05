@@ -295,17 +295,13 @@ async function runIntelligenceJob({ testOnly = false } = {}) {
 /**
  * Schedule the wallet swap for 00:01 UTC (1 minute after midnight).
  * This ensures the daily PnL report fires first at 00:00.
- *
- * @param {object} report  - The AI report from walletScorer
- * @param {string} forDate - Date string
- * @private
  */
 function _scheduleWalletSwap(report, forDate) {
   const msUntilSwap = _msUntilUTCTime(0, 1); // 00:01 UTC
 
   logger.info('[Intelligence] Wallet swap scheduled', {
     forDate,
-    inMs: msUntilSwap,
+    inMs:  msUntilSwap,
     inMin: Math.round(msUntilSwap / 60000),
   });
 
@@ -330,10 +326,7 @@ function _scheduleWalletSwap(report, forDate) {
  *   4. Add new AI-recommended wallets
  *   5. Update DB tracking records
  *   6. Send Telegram intelligence summary
- *
- * @param {object} report
- * @param {string} forDate
- * @private
+ *   7. Update Helius webhook with full active address list
  */
 async function _executeWalletSwap(report, forDate) {
   logger.info('[Intelligence] Executing wallet swap', { forDate });
@@ -344,13 +337,12 @@ async function _executeWalletSwap(report, forDate) {
   const manualWallets  = allTracked.filter((w) => w.addedByAI !== true);
   const openPositions  = positionTracker.getSummary().positions || [];
 
-  // Set of token addresses currently held (to identify active wallets)
   const walletsWithOpenPositions = new Set(
     openPositions.map((p) => p.trackedWalletAddress).filter(Boolean)
   );
 
   logger.info('[Intelligence] Swap analysis', {
-    aiWallets:    aiWallets.length,
+    aiWallets:     aiWallets.length,
     manualWallets: manualWallets.length,
     openPositions: openPositions.length,
   });
@@ -361,7 +353,6 @@ async function _executeWalletSwap(report, forDate) {
     const hasOpenPos = walletsWithOpenPositions.has(wallet.address);
 
     if (hasOpenPos) {
-      // Keep tracking — has open positions that need to close naturally
       logger.info('[Intelligence] Keeping old AI wallet (open positions)', {
         nickname: wallet.nickname,
         address:  wallet.address.slice(0, 8) + '...',
@@ -369,18 +360,14 @@ async function _executeWalletSwap(report, forDate) {
       continue;
     }
 
-    // Safe to remove — no open positions
     try {
-      // Deactivate in DB
       await tradeRepository.deactivateTrackedWallet(wallet.address);
 
-      // Update AI tracking fields
       await tradeRepository.prisma.trackedWallet.update({
         where: { address: wallet.address },
         data:  { aiRemovedAt: new Date() },
       });
 
-      // Remove from live monitor
       walletMonitor.removeWallet(wallet.address);
 
       removed.push({ address: wallet.address, nickname: wallet.nickname });
@@ -402,7 +389,6 @@ async function _executeWalletSwap(report, forDate) {
   for (const rec of report.wallets) {
     if (!rec.address) continue;
 
-    // Check if already being tracked (manual or AI)
     const existing = await tradeRepository.getTrackedWallet(rec.address);
 
     if (existing && existing.isActive) {
@@ -410,7 +396,6 @@ async function _executeWalletSwap(report, forDate) {
         address:  rec.address.slice(0, 8) + '...',
         nickname: rec.nickname,
       });
-      // Update nickname and mark as AI-managed
       await tradeRepository.prisma.trackedWallet.update({
         where: { address: rec.address },
         data: {
@@ -427,7 +412,6 @@ async function _executeWalletSwap(report, forDate) {
     }
 
     try {
-      // Add to DB
       const dbWallet = await tradeRepository.prisma.trackedWallet.upsert({
         where:  { address: rec.address },
         create: {
@@ -444,19 +428,18 @@ async function _executeWalletSwap(report, forDate) {
           trackUntil:          rec.trackUntil      || null,
         },
         update: {
-          isActive:        true,
-          nickname:        rec.nickname,
-          addedByAI:       true,
-          aiAddedAt:       new Date(),
-          intelligenceId:  forDate,
-          aiRemovedAt:     null,
-          allocationSOL:   rec.allocationSOL   || null,
-          trackFrom:       rec.trackFrom       || null,
-          trackUntil:      rec.trackUntil      || null,
+          isActive:       true,
+          nickname:       rec.nickname,
+          addedByAI:      true,
+          aiAddedAt:      new Date(),
+          intelligenceId: forDate,
+          aiRemovedAt:    null,
+          allocationSOL:  rec.allocationSOL   || null,
+          trackFrom:      rec.trackFrom       || null,
+          trackUntil:     rec.trackUntil      || null,
         },
       });
 
-      // Add to live monitor
       await walletMonitor.addWallet({
         id:       dbWallet.id,
         address:  rec.address,
@@ -464,10 +447,6 @@ async function _executeWalletSwap(report, forDate) {
       });
 
       // ── Capital re-estimation ─────────────────────────
-      // Newly added AI wallets start with estimatedCapitalSOL = 0,
-      // which causes scalePositionSize() to use a rough fallback.
-      // Call Birdeye immediately to get a real estimate so the
-      // very first copied trade is sized correctly.
       try {
         const stats = await getWalletStats(rec.address);
         if (stats?.estimatedCapSOL > 0) {
@@ -479,7 +458,7 @@ async function _executeWalletSwap(report, forDate) {
             },
           });
           logger.info('[Intelligence] Capital estimated for new wallet', {
-            nickname:       rec.nickname,
+            nickname:        rec.nickname,
             estimatedCapSOL: stats.estimatedCapSOL,
           });
         }
@@ -499,10 +478,10 @@ async function _executeWalletSwap(report, forDate) {
       });
 
       logger.info('[Intelligence] Added new AI wallet', {
-        nickname:  rec.nickname,
-        address:   rec.address.slice(0, 8) + '...',
+        nickname:   rec.nickname,
+        address:    rec.address.slice(0, 8) + '...',
         allocation: rec.allocationSOL + ' SOL',
-        window:    `${rec.trackFrom} → ${rec.trackUntil}`,
+        window:     `${rec.trackFrom} → ${rec.trackUntil}`,
       });
 
     } catch (err) {
@@ -525,10 +504,9 @@ async function _executeWalletSwap(report, forDate) {
     },
   });
 
-  // ── Step 4: Send Telegram intelligence summary ────────
+// ── Step 4: Send Telegram intelligence summary ────────
   await _sendRaw(report.telegramSummary);
 
-  // Send a concise swap confirmation
   if (added.length > 0 || removed.length > 0) {
     const addedNames   = added.map((w) => w.nickname).join(', ');
     const removedNames = removed.map((w) => w.nickname).join(', ');
@@ -541,11 +519,109 @@ async function _executeWalletSwap(report, forDate) {
     );
   }
 
+  // ── Step 5: Write performance scores for wallets from prior cycle ─ ← NEW
+  await _writePerformanceScores(forDate).catch((err) =>
+    logger.debug('[Intelligence] Performance scoring skipped', { error: err.message })
+  );
+
+  // ── Step 6: Update Helius webhook with full address list ──────────
+  try {
+    const freshTracked    = await tradeRepository.getTrackedWallets(true);
+    const activeAddresses = freshTracked
+      .filter((w) => w.isActive)
+      .map((w) => w.address);
+
+    await _updateHeliusWebhook(activeAddresses);
+  } catch (err) {
+    logger.warn('[Intelligence] Helius webhook update failed (non-fatal)', {
+      error: err.message,
+    });
+    await _sendRaw(
+      `⚠️ _Helius webhook update failed: ${err.message}_\n` +
+      `_WebSocket monitoring still active. Webhook will sync on next nightly run._`
+    ).catch(() => {});
+  }
+
   logger.info('[Intelligence] Wallet swap complete', {
     added:   added.length,
     removed: removed.length,
     manual:  manualWallets.length,
   });
+}
+
+// ────────────────────────────────────────────────────────────
+//  HELIUS WEBHOOK AUTO-UPDATE
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Update the Helius webhook's accountAddresses to match the current
+ * active wallet roster. Called automatically after every nightly swap.
+ *
+ * Required Railway env vars:
+ *   HELIUS_WEBHOOK_ID  — webhook UUID from dashboard.helius.dev/webhooks
+ *   HELIUS_API_KEY     — already set (used by RPC too)
+ *
+ * Exported so bot.js can wire a /syncwebhook Telegram command
+ * for manual re-sync without waiting for midnight.
+ *
+ * @param {string[]} addresses - All active wallet addresses to watch
+ */
+async function _updateHeliusWebhook(addresses) {
+  const webhookId = process.env.HELIUS_WEBHOOK_ID;
+  const apiKey    = config.solana.heliusApiKey;
+
+  if (!webhookId) {
+    logger.warn('[Intelligence] HELIUS_WEBHOOK_ID not set — skipping webhook update');
+    return;
+  }
+
+  if (!apiKey) {
+    logger.warn('[Intelligence] HELIUS_API_KEY not set — skipping webhook update');
+    return;
+  }
+
+  if (!addresses || addresses.length === 0) {
+    logger.warn('[Intelligence] No active addresses — skipping webhook update');
+    return;
+  }
+
+  const url     = `https://api.helius.xyz/v0/webhooks/${webhookId}?api-key=${apiKey}`;
+  const fetchFn = globalThis.fetch || require('node-fetch');
+
+  logger.info('[Intelligence] Updating Helius webhook', {
+    webhookId,
+    addressCount: addresses.length,
+    sample: addresses.slice(0, 3).map((a) => a.slice(0, 8) + '...'),
+  });
+
+  const response = await fetchFn(url, {
+    method:  'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({
+      webhookURL:       'https://solsystems.up.railway.app/webhook/helius',
+      transactionTypes: ['SWAP'],
+      accountAddresses: addresses,
+      webhookType:      'enhanced',
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => 'unknown error');
+    throw new Error(`Helius webhook PUT failed ${response.status}: ${errText}`);
+  }
+
+  const result = await response.json();
+
+  logger.info('[Intelligence] Helius webhook updated successfully', {
+    webhookId:   result.webhookID || webhookId,
+    addresses:   addresses.length,
+    webhookType: result.webhookType,
+  });
+
+  await _sendRaw(
+    `🔗 *Helius Webhook Synced*\n` +
+    `_Monitoring ${addresses.length} wallet(s) for SWAP events._`
+  ).catch(() => {});
 }
 
 // ────────────────────────────────────────────────────────────
@@ -658,6 +734,159 @@ async function _saveReport(recordId, forDate, capitalSOL, report, dataQuality) {
 }
 
 // ────────────────────────────────────────────────────────────
+//  PERFORMANCE FEEDBACK LOOP  ← NEW
+//  Scores each AI-added wallet based on actual copy accuracy
+//  from the previous cycle, then writes it back to the DB.
+//  The aggregator reads these scores the next night to boost
+//  or penalize wallets that appear again as candidates.
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Calculate and persist a performanceScore for every AI-managed
+ * wallet based on how well your bot copied their trades.
+ *
+ * Score formula:
+ *   - Win rate of your copied trades from this wallet  (40 pts)
+ *   - Avg PnL% of copied trades                        (40 pts)
+ *   - Copy rate (trades detected vs skipped)           (20 pts)
+ *
+ * Called at the END of _executeWalletSwap, after the Helius
+ * webhook update, so it captures the full prior cycle.
+ *
+ * @param {string} forDate - The date string for this cycle
+ * @private
+ */
+async function _writePerformanceScores(forDate) {
+  logger.info('[Intelligence] Writing performance scores for prior cycle');
+
+  try {
+    // Get all wallets that were AI-managed in the previous cycle
+    const allWallets = await tradeRepository.prisma.trackedWallet.findMany({
+      where: { addedByAI: true },
+      select: {
+        id:      true,
+        address: true,
+        nickname: true,
+      },
+    });
+
+    if (allWallets.length === 0) {
+      logger.debug('[Intelligence] No AI wallets to score — skipping feedback loop');
+      return;
+    }
+
+    // Look back over the last 7 days of your copied trades
+    const since = new Date();
+    since.setUTCDate(since.getUTCDate() - 7);
+
+    for (const wallet of allWallets) {
+      try {
+        // Find all your trades that were copied from this wallet
+        const copiedTrades = await tradeRepository.prisma.trade.findMany({
+          where: {
+            trackedWalletAddress: wallet.address,
+            executedAt:           { gte: since },
+            status:               { in: ['COMPLETED', 'SOLD', 'STOP_LOSS'] },
+          },
+          select: {
+            pnlPct:    true,
+            pnlSOL:    true,
+            status:    true,
+            buyAmount: true,
+          },
+        });
+
+        if (copiedTrades.length === 0) {
+          // No trades copied from this wallet in the last 7 days
+          // Give a neutral score of 50 — not penalized, not boosted
+          await tradeRepository.prisma.trackedWallet.update({
+            where: { id: wallet.id },
+            data:  {
+              performanceScore:     50,
+              performanceScoredAt:  new Date(),
+              performanceTrades:    0,
+            },
+          });
+          continue;
+        }
+
+        const wins   = copiedTrades.filter((t) => (t.pnlPct || 0) > 0).length;
+        const losses = copiedTrades.filter((t) => (t.pnlPct || 0) <= 0).length;
+        const total  = copiedTrades.length;
+
+        const winRate   = total > 0 ? (wins / total) * 100 : 0;
+        const avgPnlPct = total > 0
+          ? copiedTrades.reduce((s, t) => s + (t.pnlPct || 0), 0) / total
+          : 0;
+
+        // ── Score component 1: Win rate of copied trades (0-40) ──
+        const winRateScore =
+          winRate >= 80 ? 40 :
+          winRate >= 70 ? 35 :
+          winRate >= 60 ? 28 :
+          winRate >= 50 ? 20 :
+          winRate >= 40 ? 12 :
+          5;
+
+        // ── Score component 2: Avg PnL% per trade (0-40) ────────
+        const pnlScore =
+          avgPnlPct >= 30  ? 40 :
+          avgPnlPct >= 20  ? 35 :
+          avgPnlPct >= 10  ? 28 :
+          avgPnlPct >= 5   ? 20 :
+          avgPnlPct >= 0   ? 12 :
+          avgPnlPct >= -10 ? 5  :
+          0;  // Avg loss > 10% = 0 pts
+
+        // ── Score component 3: Activity (0-20) ──────────────────
+        // Reward wallets that gave us more opportunities to copy
+        const activityScore =
+          total >= 15 ? 20 :
+          total >= 10 ? 16 :
+          total >= 5  ? 12 :
+          total >= 3  ? 8  :
+          4;
+
+        const performanceScore = Math.min(100,
+          winRateScore + pnlScore + activityScore
+        );
+
+        await tradeRepository.prisma.trackedWallet.update({
+          where: { id: wallet.id },
+          data: {
+            performanceScore,
+            performanceScoredAt: new Date(),
+            performanceTrades:   total,
+          },
+        });
+
+        logger.info('[Intelligence] Performance score written', {
+          nickname:         wallet.nickname,
+          address:          wallet.address.slice(0, 8) + '...',
+          performanceScore,
+          winRate:          winRate.toFixed(1) + '%',
+          avgPnlPct:        avgPnlPct.toFixed(2) + '%',
+          trades:           total,
+        });
+
+      } catch (walletErr) {
+        logger.debug('[Intelligence] Could not score wallet', {
+          address: wallet.address.slice(0, 8) + '...',
+          error:   walletErr.message,
+        });
+      }
+    }
+
+    logger.info('[Intelligence] Performance feedback loop complete');
+
+  } catch (err) {
+    logger.warn('[Intelligence] Performance scoring failed (non-fatal)', {
+      error: err.message,
+    });
+  }
+}
+
+// ────────────────────────────────────────────────────────────
 //  HELPERS
 // ────────────────────────────────────────────────────────────
 
@@ -704,4 +933,5 @@ module.exports = {
   runNow,
   getLastReport,
   runIntelligenceJob,
+  updateHeliusWebhook: _updateHeliusWebhook,
 };

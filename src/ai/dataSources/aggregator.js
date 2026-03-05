@@ -133,14 +133,20 @@ async function getCandidates() {
     removed: merged.length - filtered.length,
   });
 
-  // ── Step 4: Score each wallet ─────────────────────────
-  const scored = filtered.map((wallet) => ({
-    ...wallet,
-    score:        _scoreWallet(wallet),
-    scoreBreakdown: _scoreBreakdown(wallet),
-  }));
+// ── Step 4: Load historical performance scores ────────
+  const performanceMap = await _loadPerformanceScores();
 
-  // ── Step 5: Sort by score descending, take top N ──────
+  // ── Step 5: Score each wallet + apply performance feedback ─
+  const scored = filtered.map((wallet) => {
+    const base = {
+      ...wallet,
+      score:          _scoreWallet(wallet),
+      scoreBreakdown: _scoreBreakdown(wallet),
+    };
+    return _applyPerformanceFeedback(base, performanceMap);
+  });
+
+  // ── Step 6: Sort by score descending, take top N ──────
   const ranked = scored
     .sort((a, b) => b.score - a.score)
     .slice(0, TOP_N);
@@ -462,6 +468,104 @@ function _sourceQuality(wallets) {
   const countScore = Math.min(100, (wallets.length / MAX_WALLETS) * 100);
 
   return Math.round((avgQuality * 0.7) + (countScore * 0.3));
+}
+
+// ────────────────────────────────────────────────────────────
+//  PERFORMANCE FEEDBACK READER  ← NEW
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Load historical performance scores for wallets we've previously
+ * copied from. Called once per aggregator run and used to apply
+ * score bonuses/penalties before returning candidates to the AI.
+ *
+ * A wallet with performanceScore 80+ gets +8 bonus points.
+ * A wallet with performanceScore < 30 gets -10 penalty points.
+ * Wallets we've never seen before get no adjustment (neutral).
+ *
+ * @returns {Promise<Map<string, number>>} address → performanceScore
+ * @private
+ */
+async function _loadPerformanceScores() {
+  try {
+    // Lazy-require to avoid circular dep issues at startup
+    const { PrismaClient } = require('@prisma/client');
+    const prisma = new PrismaClient();
+
+    const wallets = await prisma.trackedWallet.findMany({
+      where: {
+        performanceScore:    { not: null },
+        performanceScoredAt: {
+          gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // last 30 days
+        },
+      },
+      select: {
+        address:          true,
+        performanceScore: true,
+        performanceTrades: true,
+      },
+    });
+
+    await prisma.$disconnect();
+
+    const scoreMap = new Map();
+    for (const w of wallets) {
+      // Only apply feedback if we have enough trades to trust the score
+      if ((w.performanceTrades || 0) >= 3) {
+        scoreMap.set(w.address, w.performanceScore);
+      }
+    }
+
+    logger.info('[Aggregator] Performance scores loaded', {
+      wallets: scoreMap.size,
+    });
+
+    return scoreMap;
+
+  } catch (err) {
+    // Non-fatal — aggregator runs fine without historical data
+    logger.debug('[Aggregator] Could not load performance scores', {
+      error: err.message,
+    });
+    return new Map();
+  }
+}
+
+/**
+ * Apply historical performance bonus/penalty to a scored wallet.
+ *
+ * @param {object} wallet          - Scored wallet with .score field
+ * @param {Map}    performanceMap  - From _loadPerformanceScores()
+ * @returns {object} Wallet with adjusted score and performanceBonus field
+ * @private
+ */
+function _applyPerformanceFeedback(wallet, performanceMap) {
+  if (!performanceMap.has(wallet.address)) {
+    return { ...wallet, performanceBonus: 0 };
+  }
+
+  const perfScore = performanceMap.get(wallet.address);
+  let bonus = 0;
+
+  if (perfScore >= 80)      bonus = +8;   // Excellent copy history
+  else if (perfScore >= 65) bonus = +5;   // Good copy history
+  else if (perfScore >= 50) bonus = +2;   // Average — slight positive signal
+  else if (perfScore >= 30) bonus = -5;   // Below average — mild penalty
+  else                      bonus = -10;  // Poor copy history — significant penalty
+
+  const newScore = Math.max(0, Math.min(100, wallet.score + bonus));
+
+  if (bonus !== 0) {
+    logger.info('[Aggregator] Performance feedback applied', {
+      address:      wallet.address.slice(0, 8) + '...',
+      baseScore:    wallet.score,
+      perfScore,
+      bonus,
+      finalScore:   newScore,
+    });
+  }
+
+  return { ...wallet, score: newScore, performanceBonus: bonus, perfScore };
 }
 
 // ────────────────────────────────────────────────────────────
