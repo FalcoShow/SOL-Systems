@@ -478,7 +478,7 @@ async function getTokenMetadata(mintAddress) {
       // Jupiter strict list — verified tokens, no auth required
       // Full list (lite-api.jup.ag/tokens/v1/all) is also available
       // but strict is sufficient and faster to load
-      const url = `https://lite-api.jup.ag/tokens/v1/all`;
+      const url = `https://tokens.jup.ag/tokens`;
       const response = await axios.get(url, { timeout: 10000 });
 
       // Response is a flat array of token objects
