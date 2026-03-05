@@ -133,7 +133,7 @@ async function getCandidates() {
     removed: merged.length - filtered.length,
   });
 
-// ── Step 4: Load historical performance scores ────────
+  // ── Step 4: Load historical performance scores ────────
   const performanceMap = await _loadPerformanceScores();
 
   // ── Step 5: Score each wallet + apply performance feedback ─

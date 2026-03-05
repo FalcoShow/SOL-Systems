@@ -469,7 +469,7 @@ function _calculateStats(txs, walletAddr) {
     : 0;
 
   // Estimate capital from largest SOL amount
-const estCapSOL = solAmounts.length > 0
+  const estCapSOL = solAmounts.length > 0
     ? Math.min(Math.max(...solAmounts) * 5, 500)  // cap at 500 SOL
     : 0;
 
