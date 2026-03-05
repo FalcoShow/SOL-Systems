@@ -475,24 +475,36 @@ async function getTokenMetadata(mintAddress) {
   // Strategy 1: Try Jupiter token list (builds full cache on first call)
   if (!_jupiterFetchFailed) {
     try {
-      const url = `https://api.jup.ag/tokens/v1`;
+      // Jupiter strict list — verified tokens, no auth required
+      // Full list (lite-api.jup.ag/tokens/v1/all) is also available
+      // but strict is sufficient and faster to load
+      const url = `https://lite-api.jup.ag/tokens/v1/strict`;
       const response = await axios.get(url, { timeout: 10000 });
-      const tokens = response.data || [];
+
+      // Response is a flat array of token objects
+      const tokens = Array.isArray(response.data) ? response.data : [];
 
       // Build the full cache in one shot so future lookups are instant
       for (const token of tokens) {
-        _metadataCache.set(token.address, {
-          symbol: token.symbol || 'UNKNOWN',
-          name:   token.name   || 'Unknown Token',
-          logoURI: token.logoURI || null,
-        });
+        if (token.address) {
+          _metadataCache.set(token.address, {
+            symbol:  token.symbol  || 'UNKNOWN',
+            name:    token.name    || 'Unknown Token',
+            logoURI: token.logoURI || null,
+          });
+        }
       }
+
+      logger.debug('Jupiter token list cached', { count: tokens.length });
 
       if (_metadataCache.has(mintAddress)) {
         return _metadataCache.get(mintAddress);
       }
+
+      // Token not in strict list — fall through to Helius
+      // This is expected for brand-new meme coins not yet verified
     } catch (err) {
-      // Mark Jupiter as failed so we don't retry DNS failures on every call
+      // Mark Jupiter as failed so we don't retry on every call
       _jupiterFetchFailed = true;
       logger.warn('Jupiter token list unavailable — using Helius for metadata', {
         error: err.message,
