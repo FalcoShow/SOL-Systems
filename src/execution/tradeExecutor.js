@@ -147,9 +147,17 @@ function _enqueueTradeEvent(event, source) {
 async function _processTradeEvent(event, source) {
   const detectedAt     = event.detectedAt || new Date();
   const walletAddress  = event.walletAddress;
-  const walletId       = event.walletId;
+  let   walletId       = event.walletId;
   const nickname       = event.nickname || shortenAddress(walletAddress);
   const signature      = event.signature || event.swapData?.txSignature;
+
+  // Resolve walletId if missing (can happen from webhook path)
+  if (!walletId && walletAddress) {
+    try {
+      const walletRecord = await tradeRepository.getTrackedWallet(walletAddress);
+      walletId = walletRecord?.id || null;
+    } catch (_) {}
+  }
 
   logger.info('Processing trade event', {
     wallet:    nickname,
