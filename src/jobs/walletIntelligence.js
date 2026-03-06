@@ -419,7 +419,7 @@ async function _executeWalletSwap(report, forDate) {
           address:             rec.address,
           nickname:            rec.nickname,
           isActive:            true,
-          estimatedCapitalSOL: rec.estimatedCapSOL || 0,
+          estimatedCapitalSOL: _sanitizeCapSOL(rec.estimatedCapSOL),
           addedByAI:           true,
           aiAddedAt:           new Date(),
           intelligenceId:      forDate,
@@ -449,11 +449,12 @@ async function _executeWalletSwap(report, forDate) {
       // ── Capital re-estimation ─────────────────────────
       try {
         const stats = await getWalletStats(rec.address);
-        if (stats?.estimatedCapSOL > 0) {
+        const sanitizedCap = _sanitizeCapSOL(stats?.estimatedCapSOL);
+        if (sanitizedCap > 0) {
           await tradeRepository.prisma.trackedWallet.update({
             where: { address: rec.address },
             data:  {
-              estimatedCapitalSOL: stats.estimatedCapSOL,
+              estimatedCapitalSOL: sanitizedCap,
               capitalUpdatedAt:    new Date(),
             },
           });
@@ -889,6 +890,30 @@ async function _writePerformanceScores(forDate) {
 // ────────────────────────────────────────────────────────────
 //  HELPERS
 // ────────────────────────────────────────────────────────────
+
+/**
+ * Sanitize an estimatedCapSOL value before writing to DB.
+ * Birdeye and some other sources return lamports instead of SOL.
+ * Any value above 10,000 is almost certainly lamports — convert it.
+ *
+ * @param {number} value - Raw capital value from external source
+ * @returns {number} - Correct SOL value, or 0 if unusable
+ */
+function _sanitizeCapSOL(value) {
+  if (!value || value <= 0) return 0;
+
+  // Values above 10,000 SOL are almost certainly in lamports
+  if (value > 10000) {
+    const converted = parseFloat((value / 1_000_000_000).toFixed(4));
+    logger.warn('[Intelligence] estimatedCapSOL appears to be lamports — auto-converting', {
+      raw:       value,
+      converted,
+    });
+    return converted > 0 && converted < 100000 ? converted : 0;
+  }
+
+  return parseFloat(value.toFixed(4));
+}
 
 /**
  * Calculate milliseconds until the next occurrence of HH:MM UTC.

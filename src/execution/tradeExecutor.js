@@ -328,9 +328,22 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
   }
 
   // ── Get tracked wallet's estimated capital ────────────────
-  const trackedCapitalSOL = trackedWallet?.manualCapitalSOL
+  let rawCapitalSOL = trackedWallet?.manualCapitalSOL
     || trackedWallet?.estimatedCapitalSOL
     || 0;
+
+  // Sanity check: values above 10,000 SOL indicate a lamports conversion
+  // bug in the intelligence job — clamp to 0 to force the safe fallback below
+  const MAX_SANE_WALLET_SOL = 10000;
+  if (rawCapitalSOL > MAX_SANE_WALLET_SOL) {
+    logger.warn('estimatedCapitalSOL appears corrupted (lamports not converted?) — using fallback', {
+      wallet:   nickname,
+      rawValue: rawCapitalSOL,
+    });
+    rawCapitalSOL = 0;
+  }
+
+  const trackedCapitalSOL = rawCapitalSOL;
 
   if (!trackedCapitalSOL || trackedCapitalSOL === 0) {
     logger.warn('Tracked wallet capital unknown — using fallback estimate', {
