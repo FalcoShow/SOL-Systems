@@ -223,31 +223,16 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
     tradeRepository.getTrackedWallet(walletAddress),
   ]);
 
-  // ── Time window enforcement ───────────────────────────────
-  // If the AI assigned a tracking window, skip trades outside it.
-  // e.g. trackFrom="13:00", trackUntil="21:00" → only trade 13:00–21:00 UTC
-  if (trackedWallet?.trackFrom && trackedWallet?.trackUntil) {
-    const now  = new Date();
-    const hhmm = `${String(now.getUTCHours()).padStart(2,'0')}:${String(now.getUTCMinutes()).padStart(2,'0')}`;
-    if (hhmm < trackedWallet.trackFrom || hhmm >= trackedWallet.trackUntil) {
-      logger.info('Skipping trade — outside AI tracking window', {
-        wallet: nickname,
-        token:  tokenSymbol,
-        now:    hhmm,
-        window: `${trackedWallet.trackFrom}–${trackedWallet.trackUntil} UTC`,
-      });
-      await _recordSkippedTrade(swapData, walletAddress, walletId,
-        `Outside tracking window (${trackedWallet.trackFrom}–${trackedWallet.trackUntil} UTC)`);
-      return;
-    }
-  }
+  // ── Time window — disabled, trade 24/7 for maximum capture ──
+  // Window enforcement removed: meme coin traders are active at all hours
+  // and restricting to a window costs more trades than it saves.
 
   // ── Stale entry detection ────────────────────────────────
   // If the token price has moved significantly since the tracked wallet
   // bought, our entry is stale — we'd buy at a worse price and their
   // profitable exit becomes our loss. Check the current price vs their
   // entry price to decide whether to skip, reduce, or proceed.
-  const staleMaxDev = settings.staleEntryMaxDevPct ?? 20;
+  const staleMaxDev = settings.staleEntryMaxDevPct ?? 35;
   let staleMultiplier = 1.0; // 1.0 = full position, 0.5 = half, 0 = skip
 
   if (swapData.pricePerTokenSOL && swapData.pricePerTokenSOL > 0) {
@@ -293,7 +278,7 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
             });
           }
 
-          if (deviationPct < -15) {
+          if (deviationPct < -20) {
             // Token dumping after their buy — bad signal
             logger.warn('Skipping BUY — token dumping after tracked wallet bought', {
               wallet: nickname, token: tokenSymbol,
@@ -784,7 +769,7 @@ async function _handleSell(swapData, walletAddress, walletId, nickname, detected
   // loss streak. 5+ losses in a row strongly signals the wallet's edge
   // has broken for the day — pause it to prevent further drawdown.
   if (!isWin) {
-    const EVICTION_THRESHOLD = 5;
+    const EVICTION_THRESHOLD = 3;
     const streak = await tradeRepository.getConsecutiveLosses(walletId);
 
     if (streak >= EVICTION_THRESHOLD) {
