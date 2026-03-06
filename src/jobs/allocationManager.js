@@ -132,14 +132,21 @@ async function _runAllocationCheck() {
       });
     }
 
+    // Enforce allocation bounds before writing
+    const maxAlloc = totalCapital * 0.40; // No wallet > 40% of capital
+    const minAlloc = totalCapital * 0.10; // No wallet < 10% of capital
+
     // Apply allocation changes to DB
     for (const { wallet, newAlloc, reason } of adjustments) {
       if (reason === 'insufficient_data' || reason === 'average') continue;
 
+      // Clamp allocation to [min, max] bounds
+      const clampedAlloc = Math.max(minAlloc, Math.min(newAlloc, maxAlloc));
+
       try {
         await tradeRepository.prisma.trackedWallet.update({
           where: { id: wallet.id },
-          data:  { allocationSOL: parseFloat(newAlloc.toFixed(4)) },
+          data:  { allocationSOL: parseFloat(clampedAlloc.toFixed(4)) },
         });
       } catch (err) {
         logger.debug('[Allocator] Failed to update allocation', {

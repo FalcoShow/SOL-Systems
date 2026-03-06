@@ -173,9 +173,9 @@ async function getQuote({
  *
  * @returns {Promise<VersionedTransaction>}
  */
-async function buildSwapTransaction(quote, userPublicKey) {
-  // Get dynamic priority fee instead of static value
-  const dynamicFee = await feeEstimator.getRecommendedFee();
+async function buildSwapTransaction(quote, userPublicKey, urgency = 'normal') {
+  // Get dynamic priority fee — 'high' urgency for time-critical BUYs
+  const dynamicFee = await feeEstimator.getRecommendedFee(urgency);
 
   logger.debug('Building swap transaction', { priorityFee: dynamicFee });
 
@@ -361,11 +361,12 @@ async function confirmTransaction(signature, lastValidBlockHeight) {
  * Parses the on-chain transaction to get real fill price,
  * actual amounts received, and slippage experienced.
  *
- * @param {string} signature - Confirmed transaction signature
+ * @param {string} signature        - Confirmed transaction signature
+ * @param {string} [expectedTokenMint] - The token mint we expect from the quote
  *
  * @returns {Promise<SwapResult>}
  */
-async function getSwapResult(signature) {
+async function getSwapResult(signature, expectedTokenMint = null) {
   const connection = getConnection();
 
   try {
@@ -392,9 +393,12 @@ async function getSwapResult(signature) {
     const feeSOL       = lamportsToSOL(feeLamports);
     const netSolChange = lamportsToSOL(postSol - preSol);
 
-    // Find the main token that changed
+    // Find the token that changed — prefer the expected mint from the quote
+    // to avoid picking intermediate hops or dust transfers.
     let tokenMint    = null;
     let tokenChange  = 0;
+    let fallbackMint   = null;
+    let fallbackChange = 0;
 
     for (const post of postTokens) {
       const pre = preTokens.find(
@@ -404,9 +408,30 @@ async function getSwapResult(signature) {
       const postAmt = post.uiTokenAmount?.uiAmount  || 0;
       const change  = postAmt - preAmt;
 
-      if (Math.abs(change) > Math.abs(tokenChange)) {
+      if (change === 0) continue;
+
+      // If this is the token we expected from the quote, use it
+      if (expectedTokenMint && post.mint === expectedTokenMint) {
         tokenChange = change;
         tokenMint   = post.mint;
+      }
+
+      // Track largest change as fallback
+      if (Math.abs(change) > Math.abs(fallbackChange)) {
+        fallbackChange = change;
+        fallbackMint   = post.mint;
+      }
+    }
+
+    // Use expected mint match if found, otherwise fall back to largest change
+    if (!tokenMint && fallbackMint) {
+      tokenMint   = fallbackMint;
+      tokenChange = fallbackChange;
+      if (expectedTokenMint) {
+        logger.warn('Expected token mint not found in balance changes, using fallback', {
+          expected: shortenAddress(expectedTokenMint),
+          fallback: shortenAddress(fallbackMint),
+        });
       }
     }
 
@@ -512,7 +537,8 @@ async function executeFullSwap({
       });
 
       // ── Step 2: Build transaction ────────────────────────
-      const transaction = await buildSwapTransaction(quote, userPublicKey);
+      feeEstimator.markActive();
+      const transaction = await buildSwapTransaction(quote, userPublicKey, tradeType === 'BUY' ? 'high' : 'normal');
 
       // ── Step 3: Execute (sign + send) ───────────────────
       // Try Jito bundle first for MEV protection, fallback to standard
@@ -590,7 +616,7 @@ async function executeFullSwap({
       const confirmedAt = new Date();
 
       // ── Step 5: Get actual fill data ────────────────────
-      const swapResult = await getSwapResult(signature);
+      const swapResult = await getSwapResult(signature, tokenMint);
       const totalMs    = Date.now() - startMs;
 
       logger.tradeConfirmed(

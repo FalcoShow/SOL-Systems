@@ -92,6 +92,10 @@ class WalletMonitor extends EventEmitter {
     // Last seen signature per wallet for polling
     this._lastSignature    = new Map();
 
+    // Round-robin polling: index tracks which wallet to poll next
+    this._pollIndex        = 0;
+    this._pollBackoffUntil = 0; // Timestamp — if set, skip polling until then
+
     // Running state
     this._running          = false;
   }
@@ -738,16 +742,29 @@ class WalletMonitor extends EventEmitter {
   }
 
   /**
-   * Poll each tracked wallet's recent signatures and check for
-   * any swaps we might have missed via WebSocket.
+   * Poll a subset of tracked wallets each cycle (round-robin).
+   * Polls up to WALLETS_PER_POLL wallets per 10s cycle to conserve
+   * RPC quota for trade execution. Backs off on 429 rate-limit errors.
    * @private
    */
   async _pollMissedTrades() {
     if (!this._running) return;
 
-    const connection = getConnection();
+    // Respect rate-limit backoff
+    if (Date.now() < this._pollBackoffUntil) return;
 
-    for (const [address, wallet] of this._trackedWallets.entries()) {
+    const connection = getConnection();
+    const walletEntries = Array.from(this._trackedWallets.entries());
+    if (walletEntries.length === 0) return;
+
+    // Poll up to 3 wallets per cycle (round-robin)
+    const WALLETS_PER_POLL = Math.min(3, walletEntries.length);
+
+    for (let i = 0; i < WALLETS_PER_POLL; i++) {
+      const idx = this._pollIndex % walletEntries.length;
+      this._pollIndex++;
+      const [address, wallet] = walletEntries[idx];
+
       try {
         const lastSig = this._lastSignature.get(address);
 
@@ -769,7 +786,7 @@ class WalletMonitor extends EventEmitter {
           if (this._isSeenSignature(sig)) continue;
           if (sigInfo.err) continue; // Skip failed txs
 
-          logger.info('📡 Caught missed transaction via polling', {
+          logger.info('Caught missed transaction via polling', {
             nickname:  wallet.nickname,
             signature: sig.slice(0, 8) + '...',
           });
@@ -785,13 +802,20 @@ class WalletMonitor extends EventEmitter {
             signature:     sig,
             logs:          [],
             detectedAt:    new Date(),
-            source:        'poll', // Mark as polled vs real-time
+            source:        'poll',
           });
         }
 
       } catch (err) {
-        // Don't log aggressively — polling errors are common during
-        // network hiccups and we don't want to flood the error log
+        // Back off on rate limit (429) — skip polling for 30s
+        if (err.message?.includes('429') || err.message?.includes('rate')) {
+          this._pollBackoffUntil = Date.now() + 30_000;
+          logger.warn('RPC rate limit hit during polling — backing off 30s', {
+            wallet: wallet.nickname,
+          });
+          return; // Stop this cycle entirely
+        }
+
         logger.debug('Poll check failed for wallet', {
           address: shortenAddress(address),
           error:   err.message,

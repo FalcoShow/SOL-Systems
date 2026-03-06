@@ -232,7 +232,7 @@ async function handleAddWallet(ctx, address, nickname) {
       `The bot will copy all ${finalNickname}'s trades from now on.`,
       '',
       `_To override capital estimate:_`,
-      `_/setcapital ${shortenAddress(address)} <SOL amount>_`,
+      `_/capital <SOL amount>_`,
     ];
 
     await ctx.replyWithMarkdown(lines.join('\n'));

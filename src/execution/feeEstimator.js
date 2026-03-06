@@ -25,7 +25,8 @@ const logger             = require('../utils/logger');
 const DEFAULT_FEE_MICROLAMPORTS = 100_000;    // Fallback if estimation fails
 const MAX_FEE_MICROLAMPORTS     = 500_000;    // Never pay more than this
 const MIN_FEE_MICROLAMPORTS     = 10_000;     // Floor — always pay at least this
-const CACHE_TTL_MS              = 30_000;     // 30 second cache
+const CACHE_TTL_IDLE_MS         = 30_000;     // 30s cache when idle
+const CACHE_TTL_ACTIVE_MS       = 10_000;     // 10s cache when actively trading
 
 // ────────────────────────────────────────────────────────────
 //  STATE
@@ -33,6 +34,7 @@ const CACHE_TTL_MS              = 30_000;     // 30 second cache
 
 let _cachedFee    = DEFAULT_FEE_MICROLAMPORTS;
 let _cachedAt     = 0;
+let _lastActiveAt = 0;  // Timestamp of last trade activity
 
 // ────────────────────────────────────────────────────────────
 //  MAIN EXPORT
@@ -42,14 +44,21 @@ let _cachedAt     = 0;
  * Get the recommended priority fee in microlamports per compute unit.
  * Uses cached value if fresh enough, otherwise fetches from RPC.
  *
+ * @param {'high'|'normal'} [urgency='normal'] - high uses p85 for faster inclusion
  * @returns {Promise<number>} Fee in microlamports
  */
-async function getRecommendedFee() {
+async function getRecommendedFee(urgency = 'normal') {
   const now = Date.now();
 
-  // Return cached value if fresh
-  if (now - _cachedAt < CACHE_TTL_MS) {
-    return _cachedFee;
+  // Adaptive TTL: shorter when actively trading
+  const isActive = (now - _lastActiveAt) < 60_000;
+  const ttl      = isActive ? CACHE_TTL_ACTIVE_MS : CACHE_TTL_IDLE_MS;
+
+  // Return cached value if fresh (apply urgency bump to cached value)
+  if (now - _cachedAt < ttl) {
+    return urgency === 'high'
+      ? Math.min(Math.ceil(_cachedFee * 1.15), MAX_FEE_MICROLAMPORTS)
+      : _cachedFee;
   }
 
   try {
@@ -74,7 +83,7 @@ async function getRecommendedFee() {
       return _cachedFee;
     }
 
-    // Use 75th percentile for competitive but not excessive pricing
+    // Use 75th percentile as baseline
     const p75Index = Math.floor(fees.length * 0.75);
     const p75Fee   = fees[p75Index] || fees[fees.length - 1];
 
@@ -87,14 +96,26 @@ async function getRecommendedFee() {
       clamped: _cachedFee,
       samples: fees.length,
       median:  fees[Math.floor(fees.length / 2)],
+      ttl:     ttl + 'ms',
     });
 
-    return _cachedFee;
+    // For high urgency, bump by 15% over p75 (approximates p85)
+    return urgency === 'high'
+      ? Math.min(Math.ceil(_cachedFee * 1.15), MAX_FEE_MICROLAMPORTS)
+      : _cachedFee;
 
   } catch (err) {
     logger.debug('[Fees] Fee estimation failed — using default', { error: err.message });
     return DEFAULT_FEE_MICROLAMPORTS;
   }
+}
+
+/**
+ * Signal that a trade is executing — shortens the fee cache TTL.
+ * Call this when a swap event is detected.
+ */
+function markActive() {
+  _lastActiveAt = Date.now();
 }
 
 /**
@@ -111,4 +132,4 @@ function getCurrentFee() {
 //  EXPORTS
 // ────────────────────────────────────────────────────────────
 
-module.exports = { getRecommendedFee, getCurrentFee };
+module.exports = { getRecommendedFee, getCurrentFee, markActive };

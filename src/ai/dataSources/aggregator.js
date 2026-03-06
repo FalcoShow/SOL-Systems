@@ -57,13 +57,14 @@ const MIN_DATA_QUALITY    = 20;   // Below 20 = not enough data
 const MIN_TRADES_7D       = 2;    // Need at least 2 trades in 7 days
 
 // Scoring weight config — must sum to 1.0
+// Profit-weighted: actual SOL earned matters most for our returns
 const WEIGHTS = {
-  dailyConsistency: 0.30,
-  monthlyProfit:    0.20,
-  winRate:          0.20,
-  tradeFrequency:   0.10,
-  avgHoldTime:      0.10,
-  tokenDiversity:   0.10,
+  monthlyProfit:    0.30,  // Actual profits = primary signal
+  winRate:          0.25,  // Consistency of returns
+  dailyConsistency: 0.20,  // Regular profitable activity
+  avgHoldTime:      0.10,  // Copy-trade compatibility (short holds = good)
+  tradeFrequency:   0.10,  // Not too bot-like, not too slow
+  tokenDiversity:   0.05,  // Mild diversification bonus
 };
 
 // ────────────────────────────────────────────────────────────
@@ -155,7 +156,7 @@ async function getCandidates() {
     total:   scored.length,
     topN:    ranked.length,
     topScore: ranked[0]?.score || 0,
-    topAddress: ranked[0]?.address?.slice(0, 8) + '...',
+    topAddress: (ranked[0]?.address?.slice(0, 8) || 'none') + '...',
   });
 
   return { candidates: ranked, dataQuality };
@@ -287,6 +288,23 @@ function _passesDisqualifiers(wallet) {
     return false;
   }
 
+  // Negative PnL disqualifier: if wallet lost money in 7d with enough trades, skip
+  // (no point copying a wallet that's actively losing)
+  if ((wallet.totalTrades7d || 0) >= 10 && (wallet.pnl7dUSD || 0) < -500) {
+    logger.info('[Aggregator] Disqualified: negative 7d PnL', {
+      address: addr, pnl7dUSD: wallet.pnl7dUSD, trades: wallet.totalTrades7d,
+    });
+    return false;
+  }
+
+  // Win rate floor: wallets with 10+ trades and <45% win rate are consistently bad
+  if ((wallet.totalTrades7d || 0) >= 10 && (wallet.winRatePct || 0) < 45) {
+    logger.info('[Aggregator] Disqualified: sub-45% win rate with 10+ trades', {
+      address: addr, winRate: wallet.winRatePct,
+    });
+    return false;
+  }
+
   // Log wallets that pass for visibility
   logger.info('[Aggregator] Wallet PASSED filters', {
     address: addr,
@@ -329,7 +347,22 @@ function _scoreWallet(wallet) {
   // Smart money bonus: GMGN labels this as insider/smart money
   const smartBonus  = wallet.smartMoneyLabel ? 3 : 0;
 
-  return Math.min(100, Math.round(score + sourceBonus + smartBonus));
+  // Recency bonus: wallets active in the last 24h are hotter signals
+  const lastActiveMs = wallet.lastActiveAt
+    ? Date.now() - new Date(wallet.lastActiveAt).getTime()
+    : Infinity;
+  const recencyBonus = lastActiveMs < 24 * 60 * 60 * 1000 ? 4
+    : lastActiveMs < 48 * 60 * 60 * 1000 ? 2
+    : 0;
+
+  // Recent PnL momentum: 7d PnL strongly positive = hot streak
+  const pnl7d = wallet.pnl7dUSD || 0;
+  const momentumBonus = pnl7d >= 10_000 ? 5
+    : pnl7d >= 5_000 ? 3
+    : pnl7d >= 1_000 ? 1
+    : 0;
+
+  return Math.min(100, Math.round(score + sourceBonus + smartBonus + recencyBonus + momentumBonus));
 }
 
 /**
@@ -488,11 +521,10 @@ function _sourceQuality(wallets) {
  */
 async function _loadPerformanceScores() {
   try {
-    // Lazy-require to avoid circular dep issues at startup
-    const { PrismaClient } = require('@prisma/client');
-    const prisma = new PrismaClient();
+    // Lazy-require to avoid circular dep at module load time
+    const tradeRepo = require('../../execution/tradeRepository');
 
-    const wallets = await prisma.trackedWallet.findMany({
+    const wallets = await tradeRepo.prisma.trackedWallet.findMany({
       where: {
         performanceScore:    { not: null },
         performanceScoredAt: {
@@ -505,8 +537,6 @@ async function _loadPerformanceScores() {
         performanceTrades: true,
       },
     });
-
-    await prisma.$disconnect();
 
     const scoreMap = new Map();
     for (const w of wallets) {

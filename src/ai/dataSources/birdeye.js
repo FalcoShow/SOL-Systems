@@ -353,10 +353,13 @@ function _calculateStatsFromTxs(txs) {
     ? holdTimes.reduce((s, t) => s + t, 0) / holdTimes.length
     : 0;
 
-  // Estimate capital from largest single SOL amount seen
-  const estCapSOL = solAmounts.length > 0
-    ? Math.max(...solAmounts) * 10  // Rough estimate: largest trade ≈ 10% of capital
-    : 0;
+  // Estimate capital using 75th percentile of trade sizes (not max — avoids outlier inflation)
+  let estCapSOL = 0;
+  if (solAmounts.length > 0) {
+    const sorted = [...solAmounts].sort((a, b) => a - b);
+    const p75    = sorted[Math.floor(sorted.length * 0.75)] || sorted[sorted.length - 1];
+    estCapSOL    = p75 * 10; // Assumes typical trade is ~10% of capital
+  }
 
   // Trades per day (over 7 day window)
   const tradesPerDay = txs.length / 7;

@@ -675,11 +675,14 @@ function applyRiskLimits(proposedPositionSOL, settings, context) {
     };
   }
 
-  if (dailyLossLimitSOL > 0 && Math.abs(todayLossSOL) >= dailyLossLimitSOL) {
+  // todayLossSOL is NET PnL: positive = winning, negative = losing.
+  // Only trigger loss limit when net negative.
+  const netLossAbs = Math.abs(Math.min(todayLossSOL, 0));
+  if (dailyLossLimitSOL > 0 && netLossAbs >= dailyLossLimitSOL) {
     return {
       approved: false,
       finalPositionSOL: 0,
-      skipReason: `Daily loss limit hit (${Math.abs(todayLossSOL).toFixed(4)} SOL >= ${dailyLossLimitSOL} SOL limit)`,
+      skipReason: `Daily loss limit hit (${netLossAbs.toFixed(4)} SOL >= ${dailyLossLimitSOL} SOL limit)`,
     };
   }
 

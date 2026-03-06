@@ -902,8 +902,9 @@ async function _writePerformanceScores(forDate) {
 function _sanitizeCapSOL(value) {
   if (!value || value <= 0) return 0;
 
-  // Values above 10,000 SOL are almost certainly in lamports
-  if (value > 10000) {
+  // Values above 50,000 SOL are almost certainly in lamports
+  // (whale wallets can legitimately hold 10k–50k SOL)
+  if (value > 50000) {
     const converted = parseFloat((value / 1_000_000_000).toFixed(4));
     logger.warn('[Intelligence] estimatedCapSOL appears to be lamports — auto-converting', {
       raw:       value,

@@ -224,6 +224,7 @@ async function _extractFromSwapEvent(tx, walletAddress, detectedAt) {
   const inputIsStable = STABLE_MINTS.has(inputMint);
 
   let tradeType, tokenMint, amountSOL, amountTokens;
+  let isTokenToToken = false;
 
   if (inputIsSOL || inputIsStable) {
     // Spent SOL/stable → received token = BUY
@@ -239,15 +240,39 @@ async function _extractFromSwapEvent(tx, walletAddress, detectedAt) {
     amountTokens = _extractAmount(input);
   } else {
     // Token → Token swap (rare, e.g. WIF → BONK)
-    // Treat the input as SELL and output as BUY
-    // Use the larger-valued side as the "SOL equivalent"
+    // We'll copy this as a BUY of the output token with SOL.
+    // Must estimate SOL-equivalent value from input token's USD price.
     tradeType    = 'BUY';
     tokenMint    = outputMint;
-    amountSOL    = _extractAmount(input);   // Approximate
     amountTokens = _extractAmount(output);
-    logger.debug('Token→Token swap detected', {
-      inputMint:  shortenAddress(inputMint),
-      outputMint: shortenAddress(outputMint),
+
+    const inputAmount = _extractAmount(input);
+    let inputPriceUSD = 0;
+    let solPriceUSD   = 0;
+    try {
+      [inputPriceUSD, solPriceUSD] = await Promise.all([
+        getTokenPrice(inputMint).catch(() => 0),
+        getSOLPrice().catch(() => 0),
+      ]);
+    } catch (_) { /* non-fatal */ }
+
+    if (inputPriceUSD > 0 && solPriceUSD > 0) {
+      amountSOL = (inputAmount * inputPriceUSD) / solPriceUSD;
+    } else {
+      // Can't estimate SOL value — skip to avoid corrupted position sizing
+      logger.debug('Token→Token swap: cannot estimate SOL value, skipping', {
+        inputMint:  shortenAddress(inputMint),
+        outputMint: shortenAddress(outputMint),
+      });
+      return null;
+    }
+
+    isTokenToToken = true;
+    logger.debug('Token→Token swap detected — estimated SOL value', {
+      inputMint:     shortenAddress(inputMint),
+      outputMint:    shortenAddress(outputMint),
+      inputAmount,
+      estimatedSOL:  amountSOL.toFixed(4),
     });
   }
 
@@ -279,8 +304,8 @@ async function _extractFromSwapEvent(tx, walletAddress, detectedAt) {
     pricePerTokenUSD: parseFloat((pricePerTokenUSD || 0).toFixed(8)),
     blockTime:        tx.timestamp ? new Date(tx.timestamp * 1000) : new Date(),
     detectedAt,
-    source:           'helius-swap-event',
-    confidence:       'high',
+    source:           isTokenToToken ? 'helius-swap-event-token2token' : 'helius-swap-event',
+    confidence:       isTokenToToken ? 'medium' : 'high',
   };
 }
 

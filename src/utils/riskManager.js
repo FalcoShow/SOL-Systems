@@ -61,8 +61,9 @@ function checkDailyLossLimit({ todayLossSOL, dailyLossLimitSOL }) {
     };
   }
 
-  // Normalise — losses may be stored as negative numbers in the DB
-  const lossAbs = Math.abs(todayLossSOL || 0);
+  // todayLossSOL is NET PnL: positive = winning, negative = losing.
+  // Only trigger on net-negative days — Math.min clamps gains to 0.
+  const lossAbs = Math.abs(Math.min(todayLossSOL || 0, 0));
   const limit   = Math.abs(dailyLossLimitSOL);
 
   if (lossAbs >= limit) {

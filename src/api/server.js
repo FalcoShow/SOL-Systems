@@ -31,8 +31,12 @@ const walletIntelligence  = require('../jobs/walletIntelligence');
 const app = express();
 
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+// CORS: allow dashboard origin in production, open in dev
+const CORS_ORIGINS = config.api?.dashboardUrl
+  ? [config.api.dashboardUrl]
+  : '*';
 app.use(cors({
-  origin: '*',
+  origin: CORS_ORIGINS,
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization','X-API-Key','x-api-key','helius-signature'],
 }));
@@ -332,6 +336,17 @@ async function start() {
 
   _wss.on('connection', (ws, req) => {
     const ip = req.socket.remoteAddress;
+
+    // Verify API key on WebSocket connect (passed as ?token= query param)
+    const url = new URL(req.url, 'http://localhost');
+    const apiKey = url.searchParams.get('token');
+    const configuredKey = process.env.DASHBOARD_API_KEY;
+    if (configuredKey && apiKey !== configuredKey) {
+      logger.warn('WS connection rejected — invalid token', { ip });
+      ws.close(4001, 'Unauthorized');
+      return;
+    }
+
     logger.debug('WS client connected', { ip });
     try {
       ws.send(JSON.stringify({

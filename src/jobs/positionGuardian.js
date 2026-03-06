@@ -113,12 +113,12 @@ async function _runGuardianCheck() {
       return;
     }
 
-    // Thresholds from settings (with sane defaults)
-    const stopLossPct             = settings.stopLossPct              ?? -30;
-    const takeProfitPct           = settings.takeProfitPct            ?? 100;
-    const trailingStopActivatePct = settings.trailingStopActivatePct  ?? 30;
+    // Thresholds from settings (with sane defaults for meme coins)
+    const stopLossPct             = settings.stopLossPct              ?? -25;   // Tighter than -30: meme coins go to 0 fast
+    const takeProfitPct           = settings.takeProfitPct            ?? 75;    // Take profit earlier — don't wait for 2x
+    const trailingStopActivatePct = settings.trailingStopActivatePct  ?? 25;    // Start trailing sooner
     const trailingStopTrailPct    = settings.trailingStopTrailPct     ?? 50;
-    const maxHoldTimeHours        = settings.maxHoldTimeHours         ?? 24;
+    const maxHoldTimeHours        = settings.maxHoldTimeHours         ?? 18;    // Meme coins stale faster than 24hrs
 
     for (const position of positions) {
       try {
@@ -296,6 +296,13 @@ async function _executeSell(position, sellPct, reason, settings) {
 
     const solReceived = swapResult.actualSolAmount || 0;
 
+    // Calculate PnL for this sell chunk
+    const chunkEntryCost = (entryAmountSOL || 0) * (sellPct / 100);
+    const pnlSOL = solReceived - chunkEntryCost;
+    const pnlPct = chunkEntryCost > 0
+      ? ((solReceived / chunkEntryCost) - 1) * 100
+      : 0;
+
     // Update position tracker
     if (sellPct >= 100) {
       positionTracker.closeMyPosition(tokenMint, {
@@ -303,18 +310,26 @@ async function _executeSell(position, sellPct, reason, settings) {
         executedPriceSOL:  swapResult.actualPriceSOL || 0,
         confirmedAt:       new Date(),
       });
+    } else {
+      // Partial sell — reduce position entry to reflect remaining portion.
+      // Without this, subsequent PnL calculations use the full original
+      // entry cost and entryTokens, inflating reported losses.
+      const pos = positionTracker.getMyPosition(tokenMint);
+      if (pos) {
+        const remainingRatio = 1 - (sellPct / 100);
+        pos.entryAmountSOL = (pos.entryAmountSOL || 0) * remainingRatio;
+        pos.entryTokens    = (pos.entryTokens    || 0) * remainingRatio;
+        logger.info('[Guardian] Position entry reduced after partial sell', {
+          token: symbol, sellPct,
+          remainingEntrySOL: pos.entryAmountSOL.toFixed(4),
+          remainingTokens:   pos.entryTokens.toFixed(2),
+        });
+      }
     }
-    // For partial sells (take-profit 50%), we don't close the position
-    // The remaining 50% continues to be tracked with updated metrics
 
     // Update DB trade record
     if (tradeId) {
       try {
-        const pnlSOL = solReceived - (entryAmountSOL || 0) * (sellPct / 100);
-        const pnlPct = entryAmountSOL > 0
-          ? ((solReceived / (entryAmountSOL * (sellPct / 100))) - 1) * 100
-          : 0;
-
         await tradeRepository.prisma.trade.update({
           where: { id: tradeId },
           data: {
@@ -334,8 +349,7 @@ async function _executeSell(position, sellPct, reason, settings) {
       }
     }
 
-    // Calculate PnL for notification
-    const pnlSOL = solReceived - (entryAmountSOL || 0) * (sellPct / 100);
+    // Format PnL for notification
     const pnlStr = pnlSOL >= 0 ? `+${pnlSOL.toFixed(4)}` : pnlSOL.toFixed(4);
     const emoji = _reasonEmoji(reason);
 

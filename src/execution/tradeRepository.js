@@ -407,6 +407,95 @@ async function recordMyTrade(data) {
 }
 
 /**
+ * Atomically record both the wallet trade and our copy trade in a single
+ * DB transaction. If the process crashes between the two, neither is saved.
+ *
+ * Handles P2002 (duplicate) gracefully — if the wallet trade already exists,
+ * returns the existing pair without creating duplicates.
+ *
+ * @param {object} walletTradeData - Fields for recordWalletTrade
+ * @param {object} myTradeData     - Fields for recordMyTrade (walletTradeId auto-set)
+ * @returns {Promise<{walletTrade: WalletTrade, myTrade: Trade}>}
+ */
+async function recordTradePair(walletTradeData, myTradeData) {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      // Create or find existing wallet trade
+      let walletTrade;
+      try {
+        walletTrade = await tx.walletTrade.create({
+          data: {
+            id:               _generateId(),
+            trackedWalletId:  walletTradeData.trackedWalletId,
+            txSignature:      walletTradeData.txSignature,
+            blockTime:        walletTradeData.blockTime || new Date(),
+            tradeType:        walletTradeData.tradeType,
+            tokenMint:        walletTradeData.tokenMint,
+            tokenSymbol:      walletTradeData.tokenSymbol  || null,
+            tokenName:        walletTradeData.tokenName    || null,
+            amountSOL:        walletTradeData.amountSOL    || 0,
+            amountTokens:     walletTradeData.amountTokens || 0,
+            pricePerTokenSOL: walletTradeData.pricePerTokenSOL || 0,
+            pricePerTokenUSD: walletTradeData.pricePerTokenUSD || null,
+            trackedCapitalSOL: walletTradeData.trackedCapitalSOL || null,
+            entryTradeId:     walletTradeData.entryTradeId || null,
+            pnlSOL:           walletTradeData.pnlSOL       || null,
+            pnlUSD:           walletTradeData.pnlUSD       || null,
+            pnlPct:           walletTradeData.pnlPct       || null,
+            isWin:            walletTradeData.isWin        ?? null,
+          },
+        });
+      } catch (err) {
+        if (err.code === 'P2002') {
+          walletTrade = await tx.walletTrade.findUnique({
+            where: { txSignature: walletTradeData.txSignature },
+          });
+        } else { throw err; }
+      }
+
+      // Create or find existing copy trade
+      let myTrade;
+      try {
+        myTrade = await tx.trade.create({
+          data: {
+            id:                 _generateId(),
+            trackedWalletId:    myTradeData.trackedWalletId,
+            walletTradeId:      walletTrade.id,
+            tradeType:          myTradeData.tradeType,
+            status:             myTradeData.status || 'PENDING',
+            tokenMint:          myTradeData.tokenMint,
+            tokenSymbol:        myTradeData.tokenSymbol    || null,
+            tokenName:          myTradeData.tokenName      || null,
+            myCapitalSOL:       myTradeData.myCapitalSOL   || 0,
+            trackedCapitalSOL:  myTradeData.trackedCapitalSOL || 0,
+            scalingRatio:       myTradeData.scalingRatio   || 0,
+            requestedAmountSOL: myTradeData.requestedAmountSOL || 0,
+            requestedPriceSOL:  myTradeData.requestedPriceSOL  || null,
+            entryTradeId:       myTradeData.entryTradeId   || null,
+            trackedPnlPct:      myTradeData.trackedPnlPct  || null,
+            detectedAt:         myTradeData.detectedAt     || new Date(),
+            isOpen:             myTradeData.tradeType === 'BUY',
+            errorMessage:       myTradeData.errorMessage   || null,
+            updatedAt:          new Date(),
+          },
+        });
+      } catch (err) {
+        if (err.code === 'P2002') {
+          myTrade = await tx.trade.findFirst({
+            where: { walletTradeId: walletTrade.id },
+          });
+        } else { throw err; }
+      }
+
+      return { walletTrade, myTrade };
+    });
+  } catch (err) {
+    logger.error('Failed to record trade pair', { error: err.message });
+    throw err;
+  }
+}
+
+/**
  * Update a trade's status and execution data after Jupiter confirms.
  *
  * @param {string} tradeId  - Trade UUID
@@ -589,10 +678,11 @@ async function getTradeById(tradeId) {
 }
 
 /**
- * Get today's total realized loss in SOL.
+ * Get today's net realized PnL in SOL (wins + losses combined).
  * Used by risk manager to check daily loss limit.
+ * Returns positive if net winning, negative if net losing.
  *
- * @returns {Promise<number>} Negative number (loss) or 0
+ * @returns {Promise<number>} Net PnL — positive (gains) or negative (losses)
  */
 async function getTodayLossSOL() {
   try {
@@ -604,7 +694,6 @@ async function getTodayLossSOL() {
         createdAt: { gte: startOfDay },
         status:    'CONFIRMED',
         tradeType: 'SELL',
-        isWin:     false,
         pnlSOL:    { not: null },
       },
       _sum: { pnlSOL: true },
@@ -976,6 +1065,54 @@ async function purgeGhostTrades() {
 }
 
 // ────────────────────────────────────────────────────────────
+//  SIGNATURE DEDUP
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Check if a transaction signature has already been processed.
+ * Queries WalletTrade table since every processed swap gets recorded there.
+ *
+ * @param {string} signature - Solana tx signature
+ * @returns {Promise<boolean>}
+ */
+async function isSignatureProcessed(signature) {
+  if (!signature) return false;
+  try {
+    const existing = await prisma.walletTrade.findUnique({
+      where: { txSignature: signature },
+      select: { id: true },
+    });
+    return !!existing;
+  } catch (err) {
+    logger.debug('isSignatureProcessed check failed', { error: err.message });
+    return false; // Fail open — let the pipeline's own dedup catch it
+  }
+}
+
+/**
+ * Get recent transaction signatures from the last N minutes.
+ * Used to seed the in-memory dedup set on startup so we don't
+ * reprocess trades that were already handled before a restart.
+ *
+ * @param {number} minutes - Lookback window (default: 30)
+ * @returns {Promise<string[]>}
+ */
+async function getRecentSignatures(minutes = 30) {
+  try {
+    const since = new Date(Date.now() - minutes * 60 * 1000);
+    const records = await prisma.walletTrade.findMany({
+      where: { blockTime: { gte: since } },
+      select: { txSignature: true },
+      orderBy: { blockTime: 'desc' },
+    });
+    return records.map(r => r.txSignature).filter(Boolean);
+  } catch (err) {
+    logger.debug('getRecentSignatures failed', { error: err.message });
+    return [];
+  }
+}
+
+// ────────────────────────────────────────────────────────────
 //  EXPORTS
 // ────────────────────────────────────────────────────────────
 
@@ -999,6 +1136,7 @@ module.exports = {
   // Trade writes
   recordWalletTrade,
   recordMyTrade,
+  recordTradePair,
   updateTradeStatus,
   cleanupGhostPositions,
   purgeGhostTrades,
@@ -1025,6 +1163,10 @@ module.exports = {
 
   // Wallet performance
   getWalletPerformance24h,
+
+  // Dedup
+  isSignatureProcessed,
+  getRecentSignatures,
 
   // Expose prisma for advanced queries in jobs
   prisma,

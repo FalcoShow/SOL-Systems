@@ -269,9 +269,9 @@ async function _saveDailySnapshot(report) {
 
 async function _sendTelegramReport(report) {
   // Lazy-load bot to avoid circular dependency on startup
-  let sendMessage;
+  let send;
   try {
-    ({ sendMessage } = require('../telegram/bot'));
+    ({ send } = require('../telegram/bot'));
   } catch {
     logger.warn('Telegram bot not available — skipping daily report message');
     return;
@@ -314,7 +314,7 @@ async function _sendTelegramReport(report) {
   ].join('\n');
 
   try {
-    await sendMessage(message, { parse_mode: 'Markdown' });
+    await send('RAW', { message });
     logger.info('Daily Telegram report sent', { date: report.date });
   } catch (err) {
     logger.error('Failed to send daily Telegram report', { error: err.message });

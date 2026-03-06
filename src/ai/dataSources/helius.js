@@ -468,10 +468,13 @@ function _calculateStats(txs, walletAddr) {
     ? holdTimes.reduce((s, t) => s + t, 0) / holdTimes.length
     : 0;
 
-  // Estimate capital from largest SOL amount
-  const estCapSOL = solAmounts.length > 0
-    ? Math.min(Math.max(...solAmounts) * 5, 500)  // cap at 500 SOL
-    : 0;
+  // Estimate capital using 75th percentile (not max — avoids outlier inflation)
+  let estCapSOL = 0;
+  if (solAmounts.length > 0) {
+    const sorted = [...solAmounts].sort((a, b) => a - b);
+    const p75    = sorted[Math.floor(sorted.length * 0.75)] || sorted[sorted.length - 1];
+    estCapSOL    = Math.min(p75 * 5, 500); // Conservative: cap at 500 SOL
+  }
 
   // Trades in last 7 days (filter to actual 7d window)
   const now7dAgo     = Math.floor(Date.now() / 1000) - (7 * 86400);

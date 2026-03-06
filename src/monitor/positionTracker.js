@@ -92,16 +92,24 @@ class PositionTracker extends EventEmitter {
       if (trade.tradeType !== 'BUY' || !trade.isOpen) continue;
 
       // Restore our position
+      const restoredEntryPrice = trade.executedPriceSOL || trade.requestedPriceSOL || 0;
+      const restoredEntrySOL   = trade.executedAmountSOL || trade.requestedAmountSOL || 0;
+      // Derive entryTokens from cost/price when DB value is missing —
+      // without this, unrealized PnL shows -100% and triggers stop-loss
+      const restoredEntryTokens = trade.amountTokens > 0
+        ? trade.amountTokens
+        : (restoredEntryPrice > 0 ? restoredEntrySOL / restoredEntryPrice : 0);
+
       const myPosition = {
         walletAddress:    'MY_WALLET',
         tokenMint:        trade.tokenMint,
         tokenSymbol:      trade.tokenSymbol || '???',
         tokenName:        trade.tokenName   || 'Unknown',
         tradeId:          trade.id,
-        entryPriceSOL:    trade.executedPriceSOL  || trade.requestedPriceSOL || 0,
+        entryPriceSOL:    restoredEntryPrice,
         entryPriceUSD:    trade.executedPriceUSD  || 0,
-        entryAmountSOL:   trade.executedAmountSOL || trade.requestedAmountSOL,
-        entryTokens:      trade.amountTokens      || 0,
+        entryAmountSOL:   restoredEntrySOL,
+        entryTokens:      restoredEntryTokens,
         entryTime:        trade.confirmedAt        || trade.createdAt,
         currentPriceSOL:  trade.executedPriceSOL  || 0,
         currentPriceUSD:  trade.executedPriceUSD  || 0,

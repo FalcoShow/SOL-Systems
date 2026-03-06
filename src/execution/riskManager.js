@@ -118,8 +118,10 @@ function checkBuy({ proposedPositionSOL, settings, context, tokenMint }) {
   }
 
   // ── Check 3: Daily loss limit ────────────────────────────
+  // todayLossSOL is NET PnL: positive = winning, negative = losing.
+  // Only trigger loss limit when net negative.
   if (dailyLossLimitSOL > 0) {
-    const lossAbs = Math.abs(todayLossSOL);
+    const lossAbs = Math.abs(Math.min(todayLossSOL, 0));
     if (lossAbs >= dailyLossLimitSOL) {
       return _reject(
         `Daily loss limit hit — lost ${lossAbs.toFixed(4)} SOL today (limit: ${dailyLossLimitSOL} SOL)`,

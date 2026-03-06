@@ -38,14 +38,21 @@ const { getSOLBalance, getSOLPrice, shortenAddress, SOLToLamports, lamportsToSOL
 const marketRegime       = require('../jobs/marketRegime');
 
 // ────────────────────────────────────────────────────────────
-//  EXECUTION QUEUE
-//  Processes one trade at a time to prevent race conditions.
-//  If Cented and another wallet both trade simultaneously,
-//  the second trade queues and runs after the first completes.
-//  concurrency: 1 = sequential processing
+//  EXECUTION QUEUES
+//  Per-wallet queues (concurrency: 1 each) keep ordering within
+//  a wallet while allowing different wallets to trade in parallel.
+//  _inFlightTokenMints prevents two wallets from BUYing the same
+//  token simultaneously (which would create duplicate positions).
 // ────────────────────────────────────────────────────────────
 
-const executionQueue = new PQueue({ concurrency: 1 });
+const _walletQueues = new Map(); // walletAddress → PQueue
+
+function _getWalletQueue(walletAddress) {
+  if (!_walletQueues.has(walletAddress)) {
+    _walletQueues.set(walletAddress, new PQueue({ concurrency: 1 }));
+  }
+  return _walletQueues.get(walletAddress);
+}
 
 // ────────────────────────────────────────────────────────────
 //  STATE
@@ -57,6 +64,10 @@ let _telegramNotifier = null;
 
 // Track trades in flight to prevent duplicate processing
 const _inFlightSignatures = new Set();
+
+// Track token mints with a BUY currently in-flight to prevent
+// two wallets from opening the same position simultaneously
+const _inFlightTokenMints = new Set();
 
 // ────────────────────────────────────────────────────────────
 //  INITIALIZATION
@@ -70,8 +81,22 @@ const _inFlightSignatures = new Set();
  * @param {object} heliusWebhook   - Singleton webhook handler
  * @param {object} telegramNotifier - Telegram notification module
  */
-function init(walletMonitor, heliusWebhook, telegramNotifier) {
+async function init(walletMonitor, heliusWebhook, telegramNotifier) {
   _telegramNotifier = telegramNotifier;
+
+  // Seed in-memory dedup set from DB so we don't reprocess
+  // trades that were already handled before a restart
+  try {
+    const recentSigs = await tradeRepository.getRecentSignatures(30);
+    for (const sig of recentSigs) {
+      _inFlightSignatures.add(sig);
+    }
+    if (recentSigs.length > 0) {
+      logger.info('Seeded dedup set from DB', { count: recentSigs.length });
+    }
+  } catch (err) {
+    logger.debug('Failed to seed dedup set — will rely on DB check', { error: err.message });
+  }
 
   // Listen for swap events from WebSocket monitor
   walletMonitor.on('swapDetected', (event) => {
@@ -99,7 +124,8 @@ function init(walletMonitor, heliusWebhook, telegramNotifier) {
  * @private
  */
 function _enqueueTradeEvent(event, source) {
-  const sig = event.signature || event.swapData?.txSignature;
+  const sig            = event.signature || event.swapData?.txSignature;
+  const walletAddress  = event.walletAddress;
 
   // Deduplicate before even queuing
   if (_inFlightSignatures.has(sig)) {
@@ -111,7 +137,9 @@ function _enqueueTradeEvent(event, source) {
 
   _inFlightSignatures.add(sig);
 
-  executionQueue.add(async () => {
+  const queue = _getWalletQueue(walletAddress || 'unknown');
+
+  queue.add(async () => {
     try {
       await _processTradeEvent(event, source);
     } catch (err) {
@@ -128,7 +156,8 @@ function _enqueueTradeEvent(event, source) {
   logger.debug('Trade event queued', {
     sig:       sig?.slice(0, 8) + '...',
     source,
-    queueSize: executionQueue.size,
+    wallet:    walletAddress?.slice(0, 8),
+    queueSize: queue.size,
   });
 }
 
@@ -157,6 +186,14 @@ async function _processTradeEvent(event, source) {
       const walletRecord = await tradeRepository.getTrackedWallet(walletAddress);
       walletId = walletRecord?.id || null;
     } catch (_) {}
+  }
+
+  // ── DB-backed dedup: skip if already processed before restart ──
+  if (signature && await tradeRepository.isSignatureProcessed(signature)) {
+    logger.debug('Signature already in DB — skipping (post-restart dedup)', {
+      sig: signature.slice(0, 8) + '...',
+    });
+    return;
   }
 
   logger.info('Processing trade event', {
@@ -204,15 +241,21 @@ async function _processTradeEvent(event, source) {
 async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedAt) {
   const { tokenMint, tokenSymbol, tokenName, amountSOL: trackedAmountSOL } = swapData;
 
-  // ── Check: Are we already in this position? ────────────────
-  if (positionTracker.isInMyPosition(tokenMint)) {
-    logger.warn('Skipping BUY — already in position', {
+  // ── Check: Are we already in this position or buying it? ──
+  if (positionTracker.isInMyPosition(tokenMint) || _inFlightTokenMints.has(tokenMint)) {
+    logger.warn('Skipping BUY — already in position or in-flight', {
       wallet: nickname,
       token:  tokenSymbol,
+      inFlight: _inFlightTokenMints.has(tokenMint),
     });
     await _recordSkippedTrade(swapData, walletAddress, walletId, 'Already in position');
     return;
   }
+
+  // Claim this token mint so parallel wallet queues can't double-buy
+  _inFlightTokenMints.add(tokenMint);
+
+  try {
 
   // ── Update tracked wallet position ────────────────────────
   positionTracker.openTrackedPosition(walletAddress, swapData);
@@ -269,13 +312,17 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
             return;
           }
 
-          if (deviationPct > staleMaxDev / 2.5) {
-            // Moderate deviation — reduce position by 50%
-            staleMultiplier = 0.5;
-            logger.info('Late entry detected — reducing position 50%', {
-              wallet: nickname, token: tokenSymbol,
-              deviation: deviationPct.toFixed(1) + '%',
-            });
+          if (deviationPct > 0) {
+            // Graduated linear scaling: 0% dev → 1.0x, staleMaxDev → 0.0x
+            // e.g. at 35% max: 10% dev → 0.71x, 20% dev → 0.43x, 30% dev → 0.14x
+            staleMultiplier = Math.max(0.1, 1 - (deviationPct / staleMaxDev));
+            if (staleMultiplier < 1.0) {
+              logger.info('Late entry — graduated position reduction', {
+                wallet: nickname, token: tokenSymbol,
+                deviation: deviationPct.toFixed(1) + '%',
+                multiplier: staleMultiplier.toFixed(2),
+              });
+            }
           }
 
           if (deviationPct < -20) {
@@ -317,9 +364,9 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
     || trackedWallet?.estimatedCapitalSOL
     || 0;
 
-  // Sanity check: values above 10,000 SOL indicate a lamports conversion
+  // Sanity check: values above 50,000 SOL indicate a lamports conversion
   // bug in the intelligence job — clamp to 0 to force the safe fallback below
-  const MAX_SANE_WALLET_SOL = 10000;
+  const MAX_SANE_WALLET_SOL = 50000;
   if (rawCapitalSOL > MAX_SANE_WALLET_SOL) {
     logger.warn('estimatedCapitalSOL appears corrupted (lamports not converted?) — using fallback', {
       wallet:   nickname,
@@ -463,38 +510,37 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
     return;
   }
 
-  // ── Record the wallet trade in DB ─────────────────────────
-  const walletTradeRecord = await tradeRepository.recordWalletTrade({
-    trackedWalletId:   walletId,
-    txSignature:       swapData.txSignature,
-    blockTime:         swapData.blockTime,
-    tradeType:         'BUY',
-    tokenMint,
-    tokenSymbol,
-    tokenName,
-    amountSOL:         trackedAmountSOL,
-    amountTokens:      swapData.amountTokens,
-    pricePerTokenSOL:  swapData.pricePerTokenSOL,
-    pricePerTokenUSD:  swapData.pricePerTokenUSD,
-    trackedCapitalSOL,
-  });
-
-  // ── Record our pending trade in DB ────────────────────────
-  const myTradeRecord = await tradeRepository.recordMyTrade({
-    trackedWalletId:    walletId,
-    walletTradeId:      walletTradeRecord.id,
-    tradeType:          'BUY',
-    tokenMint,
-    tokenSymbol,
-    tokenName,
-    myCapitalSOL,
-    trackedCapitalSOL,
-    scalingRatio,
-    requestedAmountSOL: finalPositionSOL,
-    requestedPriceSOL:  swapData.pricePerTokenSOL,
-    detectedAt,
-    status:             'PENDING',
-  });
+  // ── Record wallet trade + our pending trade atomically ────
+  const { myTrade: myTradeRecord } = await tradeRepository.recordTradePair(
+    {
+      trackedWalletId:   walletId,
+      txSignature:       swapData.txSignature,
+      blockTime:         swapData.blockTime,
+      tradeType:         'BUY',
+      tokenMint,
+      tokenSymbol,
+      tokenName,
+      amountSOL:         trackedAmountSOL,
+      amountTokens:      swapData.amountTokens,
+      pricePerTokenSOL:  swapData.pricePerTokenSOL,
+      pricePerTokenUSD:  swapData.pricePerTokenUSD,
+      trackedCapitalSOL,
+    },
+    {
+      trackedWalletId:    walletId,
+      tradeType:          'BUY',
+      tokenMint,
+      tokenSymbol,
+      tokenName,
+      myCapitalSOL,
+      trackedCapitalSOL,
+      scalingRatio,
+      requestedAmountSOL: finalPositionSOL,
+      requestedPriceSOL:  swapData.pricePerTokenSOL,
+      detectedAt,
+      status:             'PENDING',
+    },
+  );
 
   // ── Execute the swap on Jupiter ───────────────────────────
   logger.info('Executing copy BUY', {
@@ -581,6 +627,10 @@ async function _handleBuy(swapData, walletAddress, walletId, nickname, detectedA
       ourPct:        scaling.positionPct,
     });
   }
+
+  } finally {
+    _inFlightTokenMints.delete(tokenMint);
+  }
 }
 
 // ────────────────────────────────────────────────────────────
@@ -637,41 +687,40 @@ async function _handleSell(swapData, walletAddress, walletId, nickname, detected
     return;
   }
 
-  // ── Record the wallet sell trade in DB ────────────────────
-  const walletTradeRecord = await tradeRepository.recordWalletTrade({
-    trackedWalletId:  walletId,
-    txSignature:      swapData.txSignature,
-    blockTime:        swapData.blockTime,
-    tradeType:        'SELL',
-    tokenMint,
-    tokenSymbol,
-    tokenName:        swapData.tokenName,
-    amountSOL:        swapData.amountSOL,
-    amountTokens:     swapData.amountTokens,
-    pricePerTokenSOL: swapData.pricePerTokenSOL,
-    pricePerTokenUSD: swapData.pricePerTokenUSD,
-    pnlPct:           trackedPnlPct,
-    isWin:            trackedPnlPct >= 0,
-  });
-
-  // ── Record our pending sell in DB ─────────────────────────
-  const myTradeRecord = await tradeRepository.recordMyTrade({
-    trackedWalletId:    walletId,
-    walletTradeId:      walletTradeRecord.id,
-    tradeType:          'SELL',
-    tokenMint,
-    tokenSymbol,
-    tokenName:          swapData.tokenName,
-    myCapitalSOL:       settings.myCapitalSOL,
-    trackedCapitalSOL:  trackedPosition?.entryAmountSOL || 0,
-    scalingRatio:       myPosition.entryAmountSOL / (trackedPosition?.entryAmountSOL || 1),
-    requestedAmountSOL: myPosition.entryAmountSOL,
-    requestedPriceSOL:  swapData.pricePerTokenSOL,
-    entryTradeId:       myPosition.tradeId,
-    trackedPnlPct,
-    detectedAt,
-    status:             'PENDING',
-  });
+  // ── Record wallet sell + our pending sell atomically ──────
+  const { myTrade: myTradeRecord } = await tradeRepository.recordTradePair(
+    {
+      trackedWalletId:  walletId,
+      txSignature:      swapData.txSignature,
+      blockTime:        swapData.blockTime,
+      tradeType:        'SELL',
+      tokenMint,
+      tokenSymbol,
+      tokenName:        swapData.tokenName,
+      amountSOL:        swapData.amountSOL,
+      amountTokens:     swapData.amountTokens,
+      pricePerTokenSOL: swapData.pricePerTokenSOL,
+      pricePerTokenUSD: swapData.pricePerTokenUSD,
+      pnlPct:           trackedPnlPct,
+      isWin:            trackedPnlPct >= 0,
+    },
+    {
+      trackedWalletId:    walletId,
+      tradeType:          'SELL',
+      tokenMint,
+      tokenSymbol,
+      tokenName:          swapData.tokenName,
+      myCapitalSOL:       settings.myCapitalSOL,
+      trackedCapitalSOL:  trackedPosition?.entryAmountSOL || 0,
+      scalingRatio:       myPosition.entryAmountSOL / (trackedPosition?.entryAmountSOL || 1),
+      requestedAmountSOL: myPosition.entryAmountSOL,
+      requestedPriceSOL:  swapData.pricePerTokenSOL,
+      entryTradeId:       myPosition.tradeId,
+      trackedPnlPct,
+      detectedAt,
+      status:             'PENDING',
+    },
+  );
 
   // ── Execute the sell on Jupiter ───────────────────────────
   logger.info('Executing copy SELL', {
@@ -713,10 +762,18 @@ async function _handleSell(swapData, walletAddress, walletId, nickname, detected
   // ── Calculate our PnL ─────────────────────────────────────
   const entryAmountSOL  = myPosition.entryAmountSOL;
   const exitAmountSOL   = swapResult.actualSolAmount;
-  const { pnlSOL, pnlPct, isWin } = calculateSOLPnL(entryAmountSOL, exitAmountSOL);
+  const { pnlSOL, pnlPct, isWin } = calculateSOLPnL({
+    entryAmountSOL,
+    exitAmountSOL,
+    entryPriceSOL:  myPosition.entryPriceSOL,
+    exitPriceSOL:   swapResult.actualPriceSOL,
+  });
 
   // ── Verify our PnL% matched theirs ───────────────────────
-  const accuracy = verifyPercentageMatch(trackedPnlPct, pnlPct);
+  const accuracy = verifyPercentageMatch({
+    trackedPct: trackedPnlPct,
+    ourPct:     pnlPct,
+  });
 
   logger.tradePnL(tokenSymbol, pnlSOL, 0, pnlPct, isWin);
 
@@ -725,7 +782,7 @@ async function _handleSell(swapData, walletAddress, walletId, nickname, detected
       token:        tokenSymbol,
       theirPct:     trackedPnlPct.toFixed(2) + '%',
       ourPct:       pnlPct.toFixed(2) + '%',
-      deviation:    accuracy.deviation.toFixed(2) + 'pp',
+      deviation:    accuracy.deviationPp.toFixed(2) + 'pp',
       rating:       accuracy.rating,
     });
   }
@@ -749,7 +806,7 @@ async function _handleSell(swapData, walletAddress, walletId, nickname, detected
     pnlUSD,
     pnlPct,
     trackedPnlPct,
-    pnlDeviation:      accuracy.deviation,
+    pnlDeviation:      accuracy.deviationPp,
     isWin,
     isOpen:            false,
   });
@@ -887,10 +944,17 @@ async function _notify(type, data) {
  * @returns {object}
  */
 function getStatus() {
+  let totalQueued = 0, totalPending = 0;
+  for (const q of _walletQueues.values()) {
+    totalQueued  += q.size;
+    totalPending += q.pending;
+  }
   return {
-    queueSize:    executionQueue.size,
-    queuePending: executionQueue.pending,
+    walletQueues: _walletQueues.size,
+    queueSize:    totalQueued,
+    queuePending: totalPending,
     inFlight:     _inFlightSignatures.size,
+    inFlightTokens: _inFlightTokenMints.size,
   };
 }
 

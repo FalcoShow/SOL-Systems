@@ -117,8 +117,14 @@ class HeliusWebhookHandler extends EventEmitter {
       return false;
     }
 
-    // Plain string comparison — not HMAC
-    return authHeader === webhookSecret;
+    // Constant-time comparison to prevent timing attacks
+    try {
+      const a = Buffer.from(authHeader,    'utf8');
+      const b = Buffer.from(webhookSecret, 'utf8');
+      return a.length === b.length && crypto.timingSafeEqual(a, b);
+    } catch {
+      return false;
+    }
   }
 
   // ──────────────────────────────────────────────────────────

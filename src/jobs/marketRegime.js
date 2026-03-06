@@ -81,7 +81,7 @@ function getMultiplier() {
   switch (_currentRegime) {
     case 'PANIC':      return 0;      // No new buys
     case 'DEFENSIVE':  return 0.5;    // Half size
-    case 'AGGRESSIVE': return 1.15;   // Slightly larger
+    case 'AGGRESSIVE': return 1.25;   // Larger positions — SOL pumping = meme coin alpha
     default:           return 1.0;    // Normal
   }
 }

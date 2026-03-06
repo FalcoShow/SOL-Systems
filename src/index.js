@@ -111,7 +111,7 @@ async function main() {
   heliusWebhook.init(walletMonitor);
 
   logger.info('[9/14] Starting trade executor...');
-  tradeExecutor.init(walletMonitor, heliusWebhook, telegramBot);
+  await tradeExecutor.init(walletMonitor, heliusWebhook, telegramBot);
 
   logger.info('[10/14] Starting scheduled jobs...');
   dailyReportJob.start(telegramBot.send);
@@ -180,7 +180,17 @@ process.on('unhandledRejection', (reason) => {
   if (logger) logger.error('Unhandled promise rejection', { reason: msg });
 });
 
-main().catch((err) => {
+// Startup timeout — kill process if boot takes too long (e.g. DB cold start hangs)
+const BOOT_TIMEOUT_MS = 120_000; // 2 minutes
+const bootTimer = setTimeout(() => {
+  console.error('[fatal] Boot timed out after ' + (BOOT_TIMEOUT_MS / 1000) + 's — force exiting');
+  process.exit(1);
+}, BOOT_TIMEOUT_MS);
+
+main().then(() => {
+  clearTimeout(bootTimer);
+}).catch((err) => {
+  clearTimeout(bootTimer);
   console.error('[fatal] Startup error:', err.message);
   console.error(err.stack);
   process.exit(1);
