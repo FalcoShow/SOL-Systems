@@ -75,7 +75,8 @@ function useWebSocket(onMessage) {
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket(WS_URL);
+    const wsUrl = API_KEY ? `${WS_URL}?token=${API_KEY}` : WS_URL;
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
