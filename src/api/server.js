@@ -32,8 +32,9 @@ const app = express();
 
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
 // CORS: allow dashboard origin in production, open in dev
+// Strip trailing slash — browser Origin header never includes one
 const CORS_ORIGINS = config.api?.dashboardUrl
-  ? [config.api.dashboardUrl]
+  ? [config.api.dashboardUrl.replace(/\/+$/, '')]
   : '*';
 app.use(cors({
   origin: CORS_ORIGINS,
