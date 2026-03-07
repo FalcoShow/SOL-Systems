@@ -141,24 +141,20 @@ class HeliusWebhookHandler extends EventEmitter {
 
     const shortSig = signature.slice(0, 8) + '...';
 
-    // Deduplication — local cache
+    // Deduplication — local cache only
+    // Do NOT cross-check WebSocket's _seenSignatures — the WebSocket marks
+    // ALL transactions as seen (including non-swaps), which would block
+    // the webhook from processing legitimate swap events that the WebSocket
+    // didn't recognize as swaps (e.g. Pump.fun, Meteora).
+    // TradeExecutor has its own DB-level dedup (isSignatureProcessed) to
+    // prevent double execution if both WebSocket and webhook detect the same swap.
     if (this._isProcessed(signature)) {
       this._stats.duplicates++;
       logger.debug('Webhook duplicate detected (local cache)', { sig: shortSig });
       return;
     }
 
-    // Deduplication — WebSocket cache
-    if (this._walletMonitor && this._walletMonitor._isSeenSignature(signature)) {
-      this._stats.duplicates++;
-      logger.debug('Webhook duplicate detected (WebSocket already processed)', { sig: shortSig });
-      return;
-    }
-
     this._markProcessed(signature);
-    if (this._walletMonitor) {
-      this._walletMonitor._markSeenSignature(signature);
-    }
 
     const walletAddress = this._extractWalletAddress(event);
     if (!walletAddress) {

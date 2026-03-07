@@ -28,6 +28,7 @@ const logger          = require('../utils/logger');
 const CHECK_INTERVAL_MS     = 4 * 60 * 60 * 1000; // Every 4 hours
 const COLD_THRESHOLD_MS     = 8 * 60 * 60 * 1000;  // 8 hours = cold
 const LOSS_STREAK_THRESHOLD = 3;                     // 3 consecutive losses = evict
+const MIN_ALLOCATION_SOL    = 0.5;                   // Never reduce below this (gas fees make smaller trades unprofitable)
 
 // ────────────────────────────────────────────────────────────
 //  STATE
@@ -100,8 +101,8 @@ async function _runRotationCheck() {
       if (idleMs > COLD_THRESHOLD_MS) {
         // Wallet has been cold for 8+ hours — reduce allocation 50%
         const currentAlloc = wallet.allocationSOL;
-        if (currentAlloc && currentAlloc > 0) {
-          const newAlloc = currentAlloc * 0.5;
+        if (currentAlloc && currentAlloc > MIN_ALLOCATION_SOL) {
+          const newAlloc = Math.max(currentAlloc * 0.5, MIN_ALLOCATION_SOL);
           try {
             await tradeRepository.prisma.trackedWallet.update({
               where: { id: wallet.id },
