@@ -302,7 +302,7 @@ class HeliusWebhookHandler extends EventEmitter {
       const url   = `https://api.helius.xyz/v0/webhooks/${webhookId}?api-key=${config.solana.heliusApiKey}`;
 
       const response = await axios.put(url, {
-        webhookURL:       `${config.api.dashboardUrl}/webhook/helius`,
+        webhookURL:       `${config.helius.webhookBaseUrl}${config.helius.webhookPath}`,
         transactionTypes: ['SWAP'],
         accountAddresses: addresses,
         webhookType:      'enhanced',

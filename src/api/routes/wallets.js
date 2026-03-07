@@ -48,8 +48,8 @@ router.get('/', async (req, res) => {
       nickname:             w.nickname,
       isActive:             w.isActive,
       estimatedCapitalSOL:  w.estimatedCapitalSOL,
-      capitalOverrideSOL:   w.capitalOverrideSOL,
-      createdAt:            w.addedAt,
+      manualCapitalSOL:     w.manualCapitalSOL,
+      addedAt:              w.addedAt,
       lastSeenAt:           w.lastSeenAt,
       detectedTradeCount:   w._count.walletTrades,
     }));
@@ -108,8 +108,7 @@ router.post('/', async (req, res) => {
         nickname:            nickname.trim(),
         isActive:            true,
         estimatedCapitalSOL,
-        capitalOverrideSOL:  capitalOverrideSOL ? parseFloat(capitalOverrideSOL) : null,
-        createdAt:           new Date(),
+        manualCapitalSOL:    capitalOverrideSOL ? parseFloat(capitalOverrideSOL) : null,
       },
     });
 
@@ -123,7 +122,7 @@ router.post('/', async (req, res) => {
         nickname:            wallet.nickname,
         estimatedCapitalSOL: wallet.estimatedCapitalSOL,
         isActive:            wallet.isActive,
-        createdAt:           wallet.createdAt,
+        addedAt:             wallet.addedAt,
       },
     });
 
@@ -180,7 +179,7 @@ router.patch('/:address', async (req, res) => {
 
     const updates = {};
     if (nickname             !== undefined) updates.nickname            = nickname.trim();
-    if (capitalOverrideSOL   !== undefined) updates.capitalOverrideSOL  = parseFloat(capitalOverrideSOL);
+    if (capitalOverrideSOL   !== undefined) updates.manualCapitalSOL    = parseFloat(capitalOverrideSOL);
     if (isActive             !== undefined) updates.isActive            = Boolean(isActive);
 
     if (Object.keys(updates).length === 0) {
@@ -216,9 +215,9 @@ router.get('/:address/stats', async (req, res) => {
     // Fetch all closed copy trades linked to this wallet
     const trades = await prisma.trade.findMany({
       where: {
-        trackedWalletAddress: address,
-        isOpen:               false,
-        pnlSOL:               { not: null },
+        trackedWallet: { address },
+        isOpen:        false,
+        pnlSOL:        { not: null },
       },
     });
 

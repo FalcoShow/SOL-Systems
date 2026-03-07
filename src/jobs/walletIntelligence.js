@@ -36,7 +36,6 @@
 const cron             = require('node-cron');
 const tradeRepository  = require('../execution/tradeRepository');
 const walletMonitor    = require('../monitor/walletMonitor');
-const positionTracker  = require('../monitor/positionTracker');
 const { getCandidates } = require('../ai/dataSources/aggregator');
 const { runScoring }   = require('../ai/walletScorer');
 const { getWalletStats } = require('../ai/dataSources/birdeye');
@@ -335,22 +334,26 @@ async function _executeWalletSwap(report, forDate) {
   const allTracked     = await tradeRepository.getTrackedWallets(true);
   const aiWallets      = allTracked.filter((w) => w.addedByAI === true);
   const manualWallets  = allTracked.filter((w) => w.addedByAI !== true);
-  const openPositions  = positionTracker.getSummary().positions || [];
 
-  const walletsWithOpenPositions = new Set(
-    openPositions.map((p) => p.trackedWalletAddress).filter(Boolean)
+  // Query DB for wallets that have open positions (positions don't store wallet address)
+  const openTrades = await tradeRepository.prisma.trade.findMany({
+    where:  { isOpen: true },
+    select: { trackedWalletId: true },
+  });
+  const walletIdsWithOpenPositions = new Set(
+    openTrades.map((t) => t.trackedWalletId).filter(Boolean)
   );
 
   logger.info('[Intelligence] Swap analysis', {
     aiWallets:     aiWallets.length,
     manualWallets: manualWallets.length,
-    openPositions: openPositions.length,
+    openPositions: openTrades.length,
   });
 
   // ── Step 1: Remove old AI wallets (no open positions) ─
   const removed = [];
   for (const wallet of aiWallets) {
-    const hasOpenPos = walletsWithOpenPositions.has(wallet.address);
+    const hasOpenPos = walletIdsWithOpenPositions.has(wallet.id);
 
     if (hasOpenPos) {
       logger.info('[Intelligence] Keeping old AI wallet (open positions)', {
@@ -599,7 +602,7 @@ async function _updateHeliusWebhook(addresses) {
     method:  'PUT',
     headers: { 'Content-Type': 'application/json' },
     body:    JSON.stringify({
-      webhookURL:       'https://solsystems.up.railway.app/webhook/helius',
+      webhookURL:       `${config.helius.webhookBaseUrl}${config.helius.webhookPath}`,
       transactionTypes: ['SWAP'],
       accountAddresses: addresses,
       webhookType:      'enhanced',
@@ -785,15 +788,15 @@ async function _writePerformanceScores(forDate) {
         // Find all your trades that were copied from this wallet
         const copiedTrades = await tradeRepository.prisma.trade.findMany({
           where: {
-            trackedWalletAddress: wallet.address,
-            executedAt:           { gte: since },
-            status:               { in: ['COMPLETED', 'SOLD', 'STOP_LOSS'] },
+            trackedWalletId: wallet.id,
+            confirmedAt:     { gte: since },
+            status:          'CONFIRMED',
           },
           select: {
-            pnlPct:    true,
-            pnlSOL:    true,
-            status:    true,
-            buyAmount: true,
+            pnlPct:           true,
+            pnlSOL:           true,
+            status:           true,
+            requestedAmountSOL: true,
           },
         });
 

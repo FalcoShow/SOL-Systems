@@ -163,21 +163,20 @@ async function runDailyReport() {
 
     // ── Save daily snapshot to database ──────────────────
     await tradeRepository.saveDailyPnL(dateStr, {
-      totalTradesExecuted: stats.totalTrades,
-      wins:                stats.wins,
-      losses:              stats.losses,
-      winRatePct:          stats.winRatePct,
-      grossPnLSOL:         stats.grossPnLSOL,
-      netPnLSOL:           stats.netPnLSOL,
-      netPnLUSD:           stats.netPnLUSD,
-      roiPct:              stats.roiPct,
-      feesSOL:             stats.feesSOL,
-      avgExecutionMs:      stats.avgExecutionMs,
-      bestTradePnLPct:     stats.bestTrade?.pnlPct      || null,
-      worstTradePnLPct:    stats.worstTrade?.pnlPct     || null,
-      bestTokenSymbol:     stats.bestTrade?.tokenSymbol  || null,
-      worstTokenSymbol:    stats.worstTrade?.tokenSymbol || null,
-      capitalSOL:          settings.myCapitalSOL,
+      totalTradesExecuted: stats.totalTrades   || 0,
+      totalWins:           stats.wins           || 0,
+      totalLosses:         stats.losses         || 0,
+      winRatePct:          stats.winRatePct     || 0,
+      grossPnLSOL:         stats.grossPnLSOL   || 0,
+      netPnLSOL:           stats.netPnLSOL     || 0,
+      netPnLUSD:           stats.netPnLUSD     || null,
+      roiPct:              stats.roiPct        || 0,
+      feesSOL:             stats.feesSOL       || 0,
+      bestTradePnLSOL:     stats.bestTrade?.pnlSOL  || null,
+      bestTradePnLPct:     stats.bestTrade?.pnlPct  || null,
+      worstTradePnLSOL:    stats.worstTrade?.pnlSOL || null,
+      worstTradePnLPct:    stats.worstTrade?.pnlPct || null,
+      endingCapitalSOL:    settings.myCapitalSOL,
     });
 
     // ── Send Telegram daily report ────────────────────────

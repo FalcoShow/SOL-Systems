@@ -29,7 +29,7 @@ const config          = require('../config');
 
 const NOTIFICATION_RETENTION_DAYS  = 7;
 const WALLET_TRADE_RETENTION_DAYS  = 90;
-const LOG_RETENTION_DAYS           = config.logs?.retentionDays || 7;
+const LOG_RETENTION_DAYS           = config.logging?.retentionDays || 7;
 
 // ────────────────────────────────────────────────────────────
 //  STATE

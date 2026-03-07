@@ -211,11 +211,11 @@ router.post('/resume', async (req, res) => {
 router.post('/test-telegram', async (req, res) => {
   try {
     // Lazy-load to avoid circular dependencies
-    const { sendMessage } = require('../../telegram/bot');
+    const { send } = require('../../telegram/bot');
 
-    await sendMessage(
-      '✅ *SOL Systems Test*\n\nTelegram notifications are working correctly.'
-    );
+    await send('RAW', {
+      message: '✅ *SOL Systems Test*\n\nTelegram notifications are working correctly.',
+    });
 
     return res.json({ message: 'Test message sent to Telegram' });
 

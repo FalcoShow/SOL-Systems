@@ -131,8 +131,9 @@ try {
     },
 
     helius: {
-      webhookSecret: optional('HELIUS_WEBHOOK_SECRET', null),
-      webhookPath:   '/webhook/helius',
+      webhookSecret:  optional('HELIUS_WEBHOOK_SECRET', null),
+      webhookPath:    '/webhook/helius',
+      webhookBaseUrl: optional('WEBHOOK_BASE_URL', 'https://solsystems.up.railway.app'),
     },
 
     jito: {

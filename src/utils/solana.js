@@ -472,47 +472,7 @@ async function getTokenMetadata(mintAddress) {
     return _metadataCache.get(mintAddress);
   }
 
-  // Strategy 1: Try Jupiter token list (builds full cache on first call)
-  if (!_jupiterFetchFailed) {
-    try {
-      // Jupiter strict list — verified tokens, no auth required
-      // Full list (lite-api.jup.ag/tokens/v1/all) is also available
-      // but strict is sufficient and faster to load
-      const url = `https://tokens.jup.ag/tokens`;
-      const response = await axios.get(url, { timeout: 10000 });
-
-      // Response is a flat array of token objects
-      const tokens = Array.isArray(response.data) ? response.data : [];
-
-      // Build the full cache in one shot so future lookups are instant
-      for (const token of tokens) {
-        if (token.address) {
-          _metadataCache.set(token.address, {
-            symbol:  token.symbol  || 'UNKNOWN',
-            name:    token.name    || 'Unknown Token',
-            logoURI: token.logoURI || null,
-          });
-        }
-      }
-
-      logger.debug('Jupiter token list cached', { count: tokens.length });
-
-      if (_metadataCache.has(mintAddress)) {
-        return _metadataCache.get(mintAddress);
-      }
-
-      // Token not in strict list — fall through to Helius
-      // This is expected for brand-new meme coins not yet verified
-    } catch (err) {
-      // Mark Jupiter as failed so we don't retry on every call
-      _jupiterFetchFailed = true;
-      logger.warn('Jupiter token list unavailable — using Helius for metadata', {
-        error: err.message,
-      });
-    }
-  }
-
-  // Strategy 2: Helius DAS API (always available, per-token)
+  // Helius DAS API — always available, per-token lookup
   return await _getTokenMetadataHelius(mintAddress);
 }
 
@@ -563,24 +523,26 @@ async function _getTokenMetadataHelius(mintAddress) {
 
 /**
  * Get the current USD price of a token.
- * Uses Jupiter Price API v2 — no API key required.
+ * Uses Birdeye API (Jupiter Price API v2 now requires authentication).
  *
  * @param {string} mintAddress - Token mint address
  * @returns {Promise<number>} Price in USD, or 0 if unavailable
  */
 async function getTokenPrice(mintAddress) {
   try {
-    const url = `https://api.jup.ag/price/v2?ids=${mintAddress}`;
-    const response = await axios.get(url, { timeout: 5000 });
-    const priceData = response.data?.data?.[mintAddress];
+    const apiKey = config.prices.birdeyeApiKey;
+    if (!apiKey) return 0;
 
-    if (!priceData || !priceData.price) {
-      return 0;
-    }
+    const response = await axios.get(`${config.prices.birdeyeBaseUrl}/defi/price`, {
+      params:  { address: mintAddress },
+      headers: { 'X-API-KEY': apiKey },
+      timeout: 5000,
+    });
 
-    return priceData.price;
+    const price = response.data?.data?.value;
+    return price || 0;
   } catch (err) {
-    logger.debug('Failed to get token price from Jupiter', {
+    logger.debug('Failed to get token price from Birdeye', {
       mint: shortenAddress(mintAddress),
       error: err.message,
     });

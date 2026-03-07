@@ -53,7 +53,7 @@ router.get('/', async (req, res) => {
     // Default: only show CONFIRMED trades (hide SKIPPED/FAILED/PENDING ghosts)
     const where = { status: 'CONFIRMED' };
 
-    if (wallet) where.trackedWalletAddress = wallet;
+    if (wallet) where.trackedWallet = { address: wallet };
 
     if (token) {
       where.tokenSymbol = { contains: token, mode: 'insensitive' };
