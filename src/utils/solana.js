@@ -476,9 +476,6 @@ async function getTokenMetadata(mintAddress) {
   return await _getTokenMetadataHelius(mintAddress);
 }
 
-// Track if Jupiter token list fetch failed so we don't retry DNS failures repeatedly
-let _jupiterFetchFailed = false;
-
 /**
  * Fallback metadata fetch via Helius DAS API.
  * Handles brand-new tokens not yet indexed by Jupiter.
