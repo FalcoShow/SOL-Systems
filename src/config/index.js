@@ -77,8 +77,8 @@ try {
     },
 
     jupiter: {
-      quoteApiUrl:    optional('JUPITER_QUOTE_API_URL', 'https://quote-api.jup.ag/v6/quote'),
-      swapApiUrl:     optional('JUPITER_SWAP_API_URL',  'https://quote-api.jup.ag/v6/swap'),
+      quoteApiUrl:    optional('JUPITER_QUOTE_API_URL', 'https://public.jupiterapi.com/quote'),
+      swapApiUrl:     optional('JUPITER_SWAP_API_URL',  'https://public.jupiterapi.com/swap'),
       slippageBps:    optionalInt('JUPITER_SLIPPAGE_BPS', 100),
       maxPriceImpact: optionalFloat('MAX_PRICE_IMPACT_PCT', 5.0),
     },
