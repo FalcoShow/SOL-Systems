@@ -195,9 +195,9 @@ router.get('/stats/all-time', async (req, res) => {
 // deviation from tracked wallet, tx links.
 router.get('/:id', async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
+    const { id } = req.params;
 
-    if (isNaN(id)) {
+    if (!id || typeof id !== 'string') {
       return res.status(400).json({ error: 'Invalid trade ID' });
     }
 
@@ -207,14 +207,11 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: `Trade ${id} not found` });
     }
 
-    // Attach Solscan links for easy verification
+    // Attach Solscan link for easy verification
     const enriched = {
       ...trade,
-      solscanEntryUrl: trade.entryTxSignature
-        ? `https://solscan.io/tx/${trade.entryTxSignature}`
-        : null,
-      solscanExitUrl: trade.exitTxSignature
-        ? `https://solscan.io/tx/${trade.exitTxSignature}`
+      solscanUrl: trade.txSignature
+        ? `https://solscan.io/tx/${trade.txSignature}`
         : null,
     };
 

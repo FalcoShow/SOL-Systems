@@ -362,7 +362,6 @@ function summary(trades) {
     losses:         total - wins,
     winRate:        parseFloat(calculateWinRate(wins, total).toFixed(2)),
     winRatePct:     parseFloat(calculateWinRate(wins, total).toFixed(2)),
-    netPnlSOL:      parseFloat(pnlSOL.toFixed(6)),
     netPnLSOL:      parseFloat(pnlSOL.toFixed(6)),
     netPnLUSD:      parseFloat(pnlUSD.toFixed(2)),
     avgExecutionMs: avgMs,

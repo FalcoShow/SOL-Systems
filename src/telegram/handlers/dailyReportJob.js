@@ -206,7 +206,9 @@ async function runDailyReport() {
     // If the 23:50 intelligence job finished in time, preview it.
     // The full AI summary + wallet swap fires at 00:01 (that job's timer).
     const lastIntel = walletIntelligence.getLastReport();
-    if (lastIntel && lastIntel.forDate === _tomorrowDateStr()) {
+    // At 00:00 UTC the intelligence forDate is today (it was generated at 23:50 for "tomorrow")
+    const todayStr = new Date().toISOString().split('T')[0];
+    if (lastIntel && lastIntel.forDate === todayStr) {
       await _sendRaw(
         `🤖 _AI wallet intelligence report is ready._\n` +
         `_New wallet roster will activate in ~1 minute..._`
@@ -327,12 +329,6 @@ async function _sendRaw(markdownText) {
   return _sendFn('RAW', { message: markdownText });
 }
 
-/** Return tomorrow's date string "YYYY-MM-DD" in UTC. */
-function _tomorrowDateStr() {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().split('T')[0];
-}
 
 // ────────────────────────────────────────────────────────────
 //  EXPORTS
